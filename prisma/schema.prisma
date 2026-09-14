@@ -1,0 +1,173 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  /// Pooled endpoint: the app opens many short-lived connections, which is what
+  /// Neon's pooler exists to absorb. The direct endpoint runs out of slots.
+  url       = env("DATABASE_URL")
+  /// Unpooled endpoint. Migrations take advisory locks, which a transaction
+  /// pooler cannot hold across statements.
+  directUrl = env("DIRECT_URL")
+}
+
+enum ConnectionStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
+model User {
+  id       String  @id @default(cuid())
+  clerkId  String? @unique
+  /// Public handle used to find and connect with this person. Nullable so the
+  /// migration is additive; backfilled the next time the user is resolved.
+  username String? @unique
+  name     String?
+  email    String? @unique
+  image    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  hostedMeetings   Meeting[]           @relation("MeetingHost")
+  participations   Participant[]
+  sentRequests     ConnectionRequest[] @relation("ConnectionSender")
+  receivedRequests ConnectionRequest[] @relation("ConnectionReceiver")
+  sentMessages     DirectMessage[]     @relation("MessageSender")
+  receivedMessages DirectMessage[]     @relation("MessageReceiver")
+}
+
+/// A one-to-one message. Only ever readable or writable by the two people named
+/// on the row, and only while an ACCEPTED connection exists between them.
+model DirectMessage {
+  id         String    @id @default(cuid())
+  senderId   String
+  receiverId String
+  body       String
+  createdAt  DateTime  @default(now())
+  readAt     DateTime?
+  /// Client-generated idempotency key. A retry or double-tap carrying the same
+  /// value is collapsed by the unique index below rather than duplicated.
+  clientId   String?
+  /// Set the first time the author edits, which is what drives the "(edited)"
+  /// tag. Null means never edited.
+  editedAt   DateTime?
+  /// Soft delete: the row survives so replies pointing at it keep their context,
+  /// but the body is no longer served.
+  deletedAt  DateTime?
+
+  /// Quoted message. Self-relation, nullable, and deliberately `SetNull` on
+  /// delete so removing the quoted row leaves the reply intact.
+  replyToId String?
+  replyTo   DirectMessage?  @relation("MessageReply", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies   DirectMessage[] @relation("MessageReply")
+
+  sender   User @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver User @relation("MessageReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, clientId])
+  @@index([senderId, receiverId, createdAt])
+  @@index([receiverId, readAt])
+  @@index([replyToId])
+}
+
+/// Cached OpenGraph metadata for a URL shared in a message.
+///
+/// Cached rather than fetched per render for three reasons: an outbound HTTP
+/// request per message per viewer is unacceptable latency, it would let anyone
+/// use this app to hammer a third-party site, and it leaks reader activity to
+/// that site on every page view.
+model LinkPreview {
+  id String @id @default(cuid())
+
+  /// SHA-256 hex of the normalized URL, and the real cache key. The URL itself
+  /// is not indexed: it can reach 2048 characters, which overflows Postgres'
+  /// btree entry limit once multi-byte characters are involved.
+  urlHash String @unique
+  url     String
+
+  canonicalUrl String?
+  title        String?
+  description  String?
+  imageUrl     String?
+  siteName     String?
+
+  /// Set on a successful scrape. Null means every attempt so far has failed.
+  fetchedAt DateTime?
+  /// Set when the most recent attempt failed. Failures are cached too, so a dead
+  /// or hostile link is not re-fetched on every render.
+  failedAt DateTime?
+  /// Kept for diagnostics; never shown to a user.
+  failureReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([updatedAt])
+}
+
+model ConnectionRequest {
+  id         String           @id @default(cuid())
+  senderId   String
+  receiverId String
+  status     ConnectionStatus @default(PENDING)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  sender   User @relation("ConnectionSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver User @relation("ConnectionReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  /// One request row per ordered pair, so a duplicate send is rejected by the
+  /// database rather than by application logic.
+  @@unique([senderId, receiverId])
+  @@index([receiverId, status])
+  @@index([senderId, status])
+}
+
+model Meeting {
+  id              String                  @id @default(cuid())
+  title           String
+  hostId          String
+  meetingCode     String                  @unique
+  createdAt       DateTime                @default(now())
+  startsAt        DateTime?
+  endsAt          DateTime?
+  /// PRIVATE meetings admit only the host and enrolled participants, so a
+  /// leaked code is not enough to join. Direct 1-on-1 calls are private; a
+  /// meeting created to be shared by link is not.
+  isPrivate       Boolean                 @default(false)
+  host            User                    @relation("MeetingHost", fields: [hostId], references: [id], onDelete: Cascade)
+  participants    Participant[]
+  creationRequest MeetingCreationRequest?
+
+  @@index([hostId])
+}
+
+model MeetingCreationRequest {
+  id                String   @id @default(cuid())
+  /// Clerk subject from the Verified_Server_Session. Not an FK: idempotency is
+  /// scoped to Clerk_User_ID and User.clerkId is nullable.
+  clerkId           String
+  creationRequestId String
+  meetingId         String   @unique
+  createdAt         DateTime @default(now())
+  meeting           Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@unique([clerkId, creationRequestId])
+  @@index([clerkId])
+}
+
+model Participant {
+  id        String    @id @default(cuid())
+  userId    String
+  meetingId String
+  joinedAt  DateTime  @default(now())
+  leftAt    DateTime?
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  meeting   Meeting   @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, meetingId])
+  @@index([meetingId])
+}

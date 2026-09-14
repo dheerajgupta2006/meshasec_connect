@@ -1,0 +1,92 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 20% 97%;
+    --foreground: 222.2 47.4% 11.2%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 47.4% 11.2%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 47.4% 11.2%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 220 14.3% 95.9%;
+    --secondary-foreground: 220.9 39.3% 11%;
+    --muted: 220 14.3% 95.9%;
+    --muted-foreground: 220 8.9% 46.1%;
+    --accent: 220 14.3% 95.9%;
+    --accent-foreground: 220.9 39.3% 11%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 217.2 91.2% 59.8%;
+    --radius: 0.75rem;
+
+    /* Additive accessibility tokens (WCAG 2.1 AA). Existing tokens above are
+       unchanged so no existing component can regress. */
+    --destructive-text: 0 72% 38%;
+    --input-strong: 220 9% 46%;
+    --primary-emphasis: 221 83% 45%;
+    --primary-emphasis-foreground: 210 40% 98%;
+  }
+
+  /* Applied by next-themes, which sets `class="dark"` on <html> for both an
+     explicit dark choice and a "system" preference that resolves to dark.
+     The old `prefers-color-scheme` query is deliberately gone: it would win over
+     an explicit light choice made by the user. */
+  .dark {
+    --background: 222.2 47.4% 7%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 47.4% 10%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 47.4% 10%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 45%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 20%;
+    --input: 217.2 32.6% 20%;
+    --ring: 217.2 91.2% 59.8%;
+
+    /* Additive accessibility tokens (WCAG 2.1 AA). */
+    --destructive-text: 0 92% 79%;
+    --input-strong: 217 14% 58%;
+    --primary-emphasis: 217 91% 66%;
+    --primary-emphasis-foreground: 222.2 47.4% 11.2%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    min-height: 100%;
+  }
+
+  body {
+    @apply min-h-screen bg-background text-foreground antialiased;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+}
+
+/* Req 12.13: honour the OS reduced-motion preference globally. Declared outside
+   @layer base so it lands after the utilities layer and wins the cascade without
+   per-component conditionals. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+  }
+}
