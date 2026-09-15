@@ -13,6 +13,10 @@ import { unstable_noStore as noStore } from "next/cache";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import {
+  partitionMeetings,
+  resolveMeetingStatus,
+} from "@/lib/meetings/lifecycle";
 import { AddToCalendar } from "@/components/calendar/add-to-calendar";
 import { ConnectDialog } from "@/components/connections/connect-dialog";
 import {
@@ -53,9 +57,8 @@ const timeFormatter = new Intl.DateTimeFormat("en-US", {
   timeStyle: "short",
 });
 
-function meetingTimestamp(meeting: DashboardMeeting): number {
-  return (meeting.startsAt ?? meeting.createdAt).getTime();
-}
+// Sorting now lives in `lib/meetings/lifecycle.ts` alongside the status rule, so
+// the two cannot drift apart.
 
 function firstNameOf(name: string | null): string | null {
   const trimmed = (name ?? "").trim();
@@ -79,10 +82,10 @@ function MeetingCard({
 }) {
   const scheduledFor = meeting.startsAt ?? meeting.createdAt;
   const isHost = meeting.host.clerkId === clerkUserId;
-  const isInProgress =
-    !isPast &&
-    meeting.startsAt !== null &&
-    meeting.startsAt.getTime() <= Date.now();
+  // Derived from the shared lifecycle rule so an instant meeting counts as live
+  // too. The previous test required a non-null `startsAt`, which instant meetings
+  // never have, so they never showed "Ready now".
+  const isInProgress = resolveMeetingStatus(meeting, Date.now()) === "live";
 
   // "Rejoin" is only truthful for a room that has already been live; a meeting
   // whose start time is still ahead has never been open.
@@ -324,13 +327,14 @@ export default async function DashboardPage() {
     },
   });
 
-  const now = Date.now();
-  const upcomingMeetings = meetings
-    .filter((meeting) => !meeting.endsAt || meeting.endsAt.getTime() >= now)
-    .sort((first, second) => meetingTimestamp(first) - meetingTimestamp(second));
-  const pastMeetings = meetings
-    .filter((meeting) => meeting.endsAt && meeting.endsAt.getTime() < now)
-    .sort((first, second) => meetingTimestamp(second) - meetingTimestamp(first));
+  // Delegated to `lib/meetings/lifecycle.ts` rather than filtered on `endsAt`
+  // here. The old test was `endsAt && endsAt < now`, which no instant meeting can
+  // ever satisfy because instant meetings are created with `endsAt: null` — they
+  // stayed under Upcoming permanently.
+  const { upcoming: upcomingMeetings, past: pastMeetings } = partitionMeetings(
+    meetings,
+    Date.now(),
+  );
 
   const firstName = firstNameOf(me?.name ?? null);
 

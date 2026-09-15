@@ -7,7 +7,7 @@ import "server-only";
  * produced by, or predictable from, anything the browser runs.
  */
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomInt } from "node:crypto";
 
 import { MEETING_CODE_CHARS } from "@/lib/meetings/types";
 
@@ -57,4 +57,28 @@ function assertEncodingContract(meetingCode: string): void {
       "generateMeetingCode produced characters outside the A-Za-z0-9-_ alphabet.",
     );
   }
+}
+
+/** Room passcodes are always exactly this many decimal digits. */
+export const ROOM_PASSCODE_DIGITS = 6;
+
+const PASSCODE_MODULUS = 10 ** ROOM_PASSCODE_DIGITS;
+
+/**
+ * Returns a six-digit room passcode, uniformly distributed over 000000-999999.
+ *
+ * Uses `randomInt`, which rejection-samples internally. The naive
+ * `randomBytes(4) % 1000000` is biased, because 2^32 is not a multiple of
+ * 1,000,000 — the low codes would come up slightly more often, and a passcode is
+ * exactly the kind of value where a guesser benefits from that skew.
+ *
+ * Leading zeros are preserved by padding: `1234` must be shown and compared as
+ * `001234`, so every passcode is the same length. That also keeps the
+ * constant-time comparison meaningful, since it needs equal-length inputs.
+ */
+export function generateRoomPasscode(): string {
+  return String(randomInt(0, PASSCODE_MODULUS)).padStart(
+    ROOM_PASSCODE_DIGITS,
+    "0",
+  );
 }

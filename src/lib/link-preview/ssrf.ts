@@ -104,6 +104,44 @@ export function isPrivateIpv4(value: string): boolean {
   return false;
 }
 
+/**
+ * Extracts the embedded IPv4 address from an IPv4-mapped IPv6 address.
+ *
+ * Two notations must both be handled, and missing the second one is a real SSRF
+ * bypass:
+ * - the readable form, `::ffff:169.254.169.254`;
+ * - the hex form, `::ffff:a9fe:a9fe`, which is what the WHATWG URL parser
+ *   normalises the readable form into. `new URL("http://[::ffff:169.254.169.254]/")`
+ *   reports its hostname as `[::ffff:a9fe:a9fe]`, so a check that only understands
+ *   dotted quads lets the cloud metadata endpoint straight through.
+ *
+ * Returns null when the address is not IPv4-mapped.
+ */
+function embeddedIpv4(bare: string): string | null {
+  const dotted = /^::ffff:(?:0:)?((?:\d{1,3}\.){3}\d{1,3})$/.exec(bare);
+
+  if (dotted !== null) {
+    return dotted[1] ?? null;
+  }
+
+  const hex = /^::ffff:(?:0:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(bare);
+
+  if (hex === null) {
+    return null;
+  }
+
+  const high = Number.parseInt(hex[1] ?? "", 16);
+  const low = Number.parseInt(hex[2] ?? "", 16);
+
+  if (!Number.isFinite(high) || !Number.isFinite(low)) {
+    return null;
+  }
+
+  return [(high >> 8) & 0xff, high & 0xff, (low >> 8) & 0xff, low & 0xff].join(
+    ".",
+  );
+}
+
 /** True when an IPv6 address is not routable on the public internet. */
 export function isPrivateIpv6(value: string): boolean {
   const address = unwrapIpv6(value).toLowerCase();
@@ -115,12 +153,12 @@ export function isPrivateIpv6(value: string): boolean {
     return true;
   }
 
-  // IPv4-mapped and IPv4-compatible forms tunnel an IPv4 address through IPv6,
-  // so the embedded address has to be judged by the IPv4 rules.
-  const mapped = /^::ffff:(?:0:)?((?:\d{1,3}\.){3}\d{1,3})$/.exec(bare);
+  // IPv4-mapped forms tunnel an IPv4 address through IPv6, so the embedded
+  // address has to be judged by the IPv4 rules.
+  const mapped = embeddedIpv4(bare);
 
   if (mapped !== null) {
-    return isPrivateIpv4(mapped[1] ?? "");
+    return isPrivateIpv4(mapped);
   }
 
   if (/^fe[89ab][0-9a-f]:/.test(bare)) return true; // link-local

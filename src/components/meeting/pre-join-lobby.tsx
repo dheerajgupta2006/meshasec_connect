@@ -3,6 +3,7 @@
 import { useUser } from "@clerk/nextjs";
 import {
   BackgroundBlur,
+  VirtualBackground,
   supportsBackgroundProcessors,
 } from "@livekit/track-processors";
 import { Track } from "livekit-client";
@@ -11,6 +12,7 @@ import {
   AudioLines,
   Camera,
   CameraOff,
+  KeyRound,
   LoaderCircle,
   Mic,
   MicOff,
@@ -43,6 +45,16 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
+  knockForEntry,
+  verifyRoomPasscode,
+} from "@/app/meeting/[code]/actions";
+import { BackgroundPicker } from "@/components/meeting/background-picker";
+import {
+  NO_BACKGROUND,
+  type BackgroundEffect,
+} from "@/lib/meetings/backgrounds";
+import { ROOM_PASSCODE_DIGITS } from "@/lib/meetings/types";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -52,6 +64,17 @@ import {
 import { cn } from "@/lib/utils";
 
 interface PreJoinLobbyProps {
+  /**
+   * True when the visitor is neither the host nor an enrolled participant, and
+   * the room has a passcode. Resolved on the server so the field is never shown
+   * to someone who does not need it.
+   */
+  passcodeRequired?: boolean;
+  /**
+   * True when the host has a waiting room on and this visitor is not enrolled.
+   * Joining then means knocking and waiting for approval.
+   */
+  waitingRoomRequired?: boolean;
   meetingCode: string;
   meetingTitle: string;
 }
@@ -63,6 +86,14 @@ interface MediaDevicesByKind {
 }
 
 type MediaStatus = "requesting" | "ready" | "error";
+
+/**
+ * How often to check whether the host has answered a knock.
+ *
+ * Faster than the message poll because someone is actively staring at a spinner,
+ * and only guests in a waiting room ever run it.
+ */
+const KNOCK_POLL_INTERVAL_MS = 4000;
 
 type BlurStatus = "idle" | "starting" | "active" | "failed";
 
@@ -110,6 +141,8 @@ function deviceName(
 }
 
 export function PreJoinLobby({
+  passcodeRequired = false,
+  waitingRoomRequired = false,
   meetingCode,
   meetingTitle,
 }: PreJoinLobbyProps) {
@@ -140,9 +173,17 @@ export function PreJoinLobby({
   const [cameraEnabled, setCameraEnabled] = useState(true);
   const [microphoneEnabled, setMicrophoneEnabled] = useState(true);
   const [isJoining, setIsJoining] = useState(false);
+  const [passcode, setPasscode] = useState("");
+  const [passcodeError, setPasscodeError] = useState<string | null>(null);
+  const [knockState, setKnockState] = useState<
+    "idle" | "waiting" | "denied"
+  >("idle");
+  /** Held so the poll can enter the room with the name that was submitted. */
+  const knockNameRef = useRef<string>("");
   /** Mirrors `streamRef` so child components and effects can react to changes. */
   const [activeStream, setActiveStream] = useState<MediaStream | null>(null);
-  const [blurEnabled, setBlurEnabled] = useState(false);
+  const [backgroundEffect, setBackgroundEffect] =
+    useState<BackgroundEffect>(NO_BACKGROUND);
   /** `null` until support detection has run, so nothing flashes on first paint. */
   const [blurSupported, setBlurSupported] = useState<boolean | null>(null);
   const [blurStatus, setBlurStatus] = useState<BlurStatus>("idle");
@@ -332,7 +373,7 @@ export function PreJoinLobby({
     const videoTrack = activeStream?.getVideoTracks()[0] ?? null;
 
     if (
-      !blurEnabled ||
+      backgroundEffect.kind === "none" ||
       !blurSupported ||
       !activeStream ||
       !videoTrack ||
@@ -386,7 +427,12 @@ export function PreJoinLobby({
           // Autoplay may be refused; the processor keeps its own frame timing.
         }
 
-        const instance = BackgroundBlur(BLUR_RADIUS);
+        // Same processor pipeline either way; only the effect differs.
+        const instance =
+          backgroundEffect.kind === "blur"
+            ? BackgroundBlur(BLUR_RADIUS)
+            : VirtualBackground(backgroundEffect.url);
+
         await instance.init({
           kind: Track.Kind.Video,
           track: videoTrack,
@@ -411,7 +457,7 @@ export function PreJoinLobby({
         // A processor failure must never take the preview down with it.
         restorePreview();
         setBlurStatus("failed");
-        setBlurEnabled(false);
+        setBackgroundEffect(NO_BACKGROUND);
       }
     };
 
@@ -440,7 +486,9 @@ export function PreJoinLobby({
         restorePreview();
       }
     };
-  }, [activeStream, blurEnabled, blurSupported]);
+    // `backgroundEffect` is depended on as a whole: switching preset must tear
+    // the old processor down and build a new one, not mutate it in place.
+  }, [activeStream, backgroundEffect, blurSupported]);
 
   const handleCameraChange = (deviceId: string) => {
     setSelectedCameraId(deviceId);
@@ -492,13 +540,13 @@ export function PreJoinLobby({
     setMicrophoneEnabled(nextEnabled);
   };
 
-  const toggleBackgroundBlur = () => {
+  const handleBackgroundChange = (next: BackgroundEffect) => {
     if (!blurSupported) {
       return;
     }
 
-    const nextEnabled = !blurEnabled;
-    setBlurEnabled(nextEnabled);
+    const nextEnabled = next.kind !== "none";
+    setBackgroundEffect(next);
     setBlurStatus(nextEnabled ? "starting" : "idle");
   };
 
@@ -507,11 +555,88 @@ export function PreJoinLobby({
 
     const trimmedName = participantName.trim();
 
-    if (!trimmedName || mediaStatus !== "ready") {
+    if (!trimmedName || mediaStatus !== "ready" || isJoining) {
+      return;
+    }
+
+    setPasscodeError(null);
+
+    // A guest must clear the passcode before the room is entered. Verifying here
+    // rather than at the token endpoint is what lets the error appear inline in
+    // the lobby instead of as a failed connection on a black screen.
+    if (passcodeRequired) {
+      const submitted = passcode.replace(/[\s-]/g, "");
+
+      if (submitted.length !== ROOM_PASSCODE_DIGITS) {
+        setPasscodeError(
+          `Enter the ${ROOM_PASSCODE_DIGITS}-digit room passcode.`,
+        );
+        return;
+      }
+
+      setIsJoining(true);
+
+      void verifyRoomPasscode(meetingCode, submitted).then((outcome) => {
+        if (!outcome.ok) {
+          setIsJoining(false);
+          setPasscodeError(outcome.message);
+          return;
+        }
+
+        // Verified and now enrolled, so the room can be entered exactly as an
+        // invited participant would.
+        persistPreferencesAndEnter(trimmedName);
+      });
+
       return;
     }
 
     setIsJoining(true);
+
+    // Waiting room without a passcode: knock, then wait for the host.
+    if (waitingRoomRequired) {
+      void beginKnocking(trimmedName);
+      return;
+    }
+
+    persistPreferencesAndEnter(trimmedName);
+  };
+
+  /**
+   * Knocks, then polls until the host answers.
+   *
+   * Polling rather than pushing because the host's decision is a database write
+   * with no channel to this page — the guest is not in the room yet, so there is
+   * no LiveKit data channel to listen on.
+   */
+  const beginKnocking = async (trimmedName: string) => {
+    setKnockState("waiting");
+
+    const outcome = await knockForEntry(meetingCode);
+
+    if (outcome.state === "admitted") {
+      setKnockState("idle");
+      persistPreferencesAndEnter(trimmedName);
+      return;
+    }
+
+    if (outcome.state === "denied") {
+      setIsJoining(false);
+      setKnockState("denied");
+      return;
+    }
+
+    if (outcome.state === "error") {
+      setIsJoining(false);
+      setKnockState("idle");
+      setPasscodeError(outcome.message);
+      return;
+    }
+
+    knockNameRef.current = trimmedName;
+  };
+
+  const persistPreferencesAndEnter = (trimmedName: string) => {
     sessionStorage.setItem(
       `meeting:${meetingCode}:devices`,
       JSON.stringify({
@@ -522,12 +647,52 @@ export function PreJoinLobby({
         cameraEnabled,
         microphoneEnabled,
         // Additive: the meeting room ignores unknown keys, so existing readers
-        // keep working.
-        backgroundBlur: blurEnabled,
+        // keep working. `backgroundBlur` is kept for backward compatibility with
+        // a session written by an older build.
+        backgroundBlur: backgroundEffect.kind === "blur",
+        backgroundEffect,
       }),
     );
     router.push(`/meeting/${encodeURIComponent(meetingCode)}`);
   };
+
+
+  // Polls for the host's decision while the guest waits. Stops as soon as they
+  // are admitted or denied, so a page left open does not poll forever.
+  useEffect(() => {
+    if (knockState !== "waiting") {
+      return;
+    }
+
+    let cancelled = false;
+
+    const timer = window.setInterval(() => {
+      void knockForEntry(meetingCode).then((outcome) => {
+        if (cancelled) {
+          return;
+        }
+
+        if (outcome.state === "admitted") {
+          setKnockState("idle");
+          persistPreferencesAndEnter(knockNameRef.current);
+          return;
+        }
+
+        if (outcome.state === "denied") {
+          setIsJoining(false);
+          setKnockState("denied");
+        }
+      });
+    }, KNOCK_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+    // `persistPreferencesAndEnter` is recreated each render and would restart the
+    // interval on every tick, so it is deliberately not a dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [knockState, meetingCode]);
 
   const blurUnsupported = blurSupported === false;
   const blurNotice = blurUnsupported
@@ -676,42 +841,23 @@ export function PreJoinLobby({
                   className="h-6 w-px shrink-0 bg-white/15"
                   aria-hidden="true"
                 />
-                <Button
-                  type="button"
-                  size="icon"
-                  variant={blurEnabled ? "default" : "secondary"}
-                  className={cn(
-                    "rounded-full",
-                    blurEnabled && "bg-blue-600 text-white hover:bg-blue-500",
-                  )}
-                  onClick={toggleBackgroundBlur}
+                <BackgroundPicker
+                  effect={backgroundEffect}
+                  onChange={handleBackgroundChange}
+                  supported={blurSupported === true}
                   disabled={
-                    mediaStatus !== "ready" ||
-                    blurSupported !== true ||
-                    blurStatus === "starting"
+                    mediaStatus !== "ready" || blurStatus === "starting"
                   }
-                  aria-pressed={blurEnabled}
-                  aria-label={
-                    blurUnsupported
-                      ? "Background blur is unavailable in this browser"
-                      : blurEnabled
-                        ? "Turn background blur off"
-                        : "Turn background blur on"
-                  }
-                  title={
+                  notice={
                     blurUnsupported
                       ? BLUR_UNSUPPORTED_MESSAGE
-                      : blurEnabled
-                        ? "Turn background blur off"
-                        : "Turn background blur on"
+                      : blurStatus === "starting"
+                        ? "Applying…"
+                        : blurStatus === "failed"
+                          ? "That effect could not start on this device."
+                          : null
                   }
-                >
-                  {blurStatus === "starting" ? (
-                    <LoaderCircle className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Sparkles className="h-4 w-4" />
-                  )}
-                </Button>
+                />
               </div>
 
               <div className="absolute left-4 top-4 flex flex-wrap items-center gap-2">
@@ -787,6 +933,93 @@ export function PreJoinLobby({
                     className="border-zinc-700 bg-zinc-950/70 text-zinc-50 placeholder:text-zinc-600"
                   />
                 </div>
+
+                {knockState === "waiting" && (
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className="flex items-start gap-3 rounded-xl border border-blue-400/25 bg-blue-500/10 px-3 py-3"
+                  >
+                    <LoaderCircle
+                      className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-blue-300"
+                      aria-hidden="true"
+                    />
+                    <div className="min-w-0 text-sm">
+                      <p className="font-medium text-blue-100">
+                        Waiting for the host to let you in
+                      </p>
+                      <p className="mt-0.5 text-xs text-blue-200/80">
+                        You will join automatically once they admit you.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {knockState === "denied" && (
+                  <div
+                    role="alert"
+                    className="rounded-xl border border-red-400/25 bg-red-500/10 px-3 py-3 text-sm"
+                  >
+                    <p className="font-medium text-red-100">
+                      The host did not admit you
+                    </p>
+                    <p className="mt-0.5 text-xs text-red-200/80">
+                      Ask them to invite you again if that was a mistake.
+                    </p>
+                  </div>
+                )}
+
+                {/* Only rendered for a guest who is not already enrolled. The
+                    host and invited participants never see this. */}
+                {passcodeRequired && (
+                  <div className="space-y-2">
+                    <label
+                      className="flex items-center gap-2 text-sm font-medium"
+                      htmlFor="room-passcode"
+                    >
+                      <KeyRound className="h-4 w-4 text-zinc-400" />
+                      Room passcode
+                    </label>
+                    <Input
+                      id="room-passcode"
+                      value={passcode}
+                      onChange={(event) => {
+                        setPasscode(event.target.value);
+                        setPasscodeError(null);
+                      }}
+                      // `numeric` rather than `number`: a number input allows
+                      // exponent characters and strips leading zeros, which a
+                      // passcode like 001234 depends on.
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      placeholder="6-digit code"
+                      maxLength={16}
+                      aria-invalid={passcodeError !== null}
+                      aria-describedby={
+                        passcodeError === null
+                          ? "room-passcode-hint"
+                          : "room-passcode-error"
+                      }
+                      className="border-zinc-700 bg-zinc-950/70 font-mono text-lg tracking-[0.3em] text-zinc-50 placeholder:tracking-normal placeholder:text-zinc-600"
+                    />
+                    {passcodeError === null ? (
+                      <p
+                        id="room-passcode-hint"
+                        className="text-xs text-zinc-500"
+                      >
+                        Ask the host for the code shown in their invite.
+                      </p>
+                    ) : (
+                      <p
+                        id="room-passcode-error"
+                        role="alert"
+                        className="text-xs font-medium text-red-400"
+                      >
+                        {passcodeError}
+                      </p>
+                    )}
+                  </div>
+                )}
 
                 <div className="space-y-2">
                   <label className="flex items-center gap-2 text-sm font-medium">

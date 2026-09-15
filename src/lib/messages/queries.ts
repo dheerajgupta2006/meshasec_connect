@@ -8,6 +8,11 @@ import "server-only";
  * enforce participation, not permission.
  */
 
+import {
+  MAX_SEARCH_CHARS,
+  MAX_SEARCH_HITS,
+  MIN_SEARCH_CHARS,
+} from "@/lib/messages/search-limits";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -68,10 +73,9 @@ const QUOTED_PREVIEW_CHARS = 120;
 /** Placeholder shown wherever a soft-deleted message would otherwise appear. */
 export const DELETED_MESSAGE_PLACEHOLDER = "This message was deleted";
 
-/** Below this a search is mostly a full-table scan for no user benefit. */
-export const MIN_SEARCH_CHARS = 2;
-const MAX_SEARCH_CHARS = 200;
-const MAX_SEARCH_HITS = 40;
+// Re-exported so existing server-side importers keep working unchanged.
+export { MIN_SEARCH_CHARS } from "@/lib/messages/search-limits";
+
 const SNIPPET_LEAD_CHARS = 40;
 const SNIPPET_TRAIL_CHARS = 100;
 
@@ -102,9 +106,17 @@ export async function listThread(
         select: { id: true, body: true, senderId: true, deletedAt: true },
       },
     },
-    orderBy: { createdAt: "asc" },
+    // Newest-first *then* reversed, which is not the same as ordering ascending.
+    // `orderBy: asc` with a `take` keeps the OLDEST N rows, so once a thread
+    // passed 200 messages every new message fell outside the window and the
+    // conversation appeared frozen. The window has to be anchored to the recent
+    // end and flipped afterwards.
+    orderBy: { createdAt: "desc" },
     take: MAX_THREAD_MESSAGES,
   });
+
+  // Restores the oldest-first order the caller and the UI expect.
+  rows.reverse();
 
   return rows.map((row) => {
     const deleted = row.deletedAt !== null;

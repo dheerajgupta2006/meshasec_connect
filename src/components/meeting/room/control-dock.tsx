@@ -1,6 +1,6 @@
 "use client";
 
-import { useLocalParticipant, useParticipants, useRoomContext } from "@livekit/components-react";
+import { useLocalParticipant, useParticipants } from "@livekit/components-react";
 import {
   Hand,
   LayoutGrid,
@@ -11,10 +11,12 @@ import {
   PhoneOff,
   Smile,
   SquareUser,
+  UserPlus,
   Users,
   Video,
   VideoOff,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -26,7 +28,12 @@ import {
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
 import { cn } from "@/lib/utils";
 
+import type { BackgroundEffect } from "@/lib/meetings/backgrounds";
+
+import { useCall } from "../call-provider";
+import { BackgroundControl } from "./background-control";
 import { useMeetingChat } from "./chat-drawer";
+import { InviteToCallModal } from "./invite-to-call-modal";
 import { ReactionPicker, useReactions } from "./reactions";
 import type { LayoutMode } from "./video-grid";
 
@@ -43,6 +50,10 @@ export interface ControlDockProps {
   onLayoutChange: (layout: LayoutMode) => void;
   activeDrawer: DrawerId;
   onDrawerChange: (drawer: DrawerId) => void;
+  /** Needed to invite people into *this* room. */
+  meetingCode: string;
+  /** Background chosen in the lobby, applied once the camera track exists. */
+  initialBackgroundEffect: BackgroundEffect;
 }
 
 interface DockButtonProps extends React.ComponentPropsWithoutRef<"button"> {
@@ -101,8 +112,9 @@ export function ControlDock({
   onLayoutChange,
   activeDrawer,
   onDrawerChange,
+  meetingCode,
+  initialBackgroundEffect,
 }: ControlDockProps): React.JSX.Element {
-  const room = useRoomContext();
   const participants = useParticipants();
   const {
     localParticipant,
@@ -113,7 +125,11 @@ export function ControlDock({
   const { unreadCount } = useMeetingChat();
   const { localHandRaised } = useReactions();
 
+  const { leaveCall } = useCall();
+  const router = useRouter();
+
   const [reactionsOpen, setReactionsOpen] = React.useState(false);
+  const [inviteOpen, setInviteOpen] = React.useState(false);
   const [micPending, setMicPending] = React.useState(false);
   const [cameraPending, setCameraPending] = React.useState(false);
   const [screenPending, setScreenPending] = React.useState(false);
@@ -292,8 +308,12 @@ export function ControlDock({
   });
 
   const leave = React.useCallback(() => {
-    void room.disconnect().catch(() => undefined);
-  }, [room]);
+    // Routed through the provider, which owns the connection and is the only
+    // place that records attendance. Navigating away deliberately does not do
+    // this — pressing Leave is the only thing that means "I am done".
+    leaveCall();
+    router.push("/dashboard");
+  }, [leaveCall, router]);
 
   const toggleDrawer = React.useCallback(
     (drawer: Exclude<DrawerId, null>) => {
@@ -423,6 +443,16 @@ export function ControlDock({
           icon={<Users className="h-5 w-5" aria-hidden="true" />}
         />
 
+        <BackgroundControl initialEffect={initialBackgroundEffect} />
+
+        <DockButton
+          label="Add people to this call"
+          tone={inviteOpen ? "on" : "neutral"}
+          aria-pressed={inviteOpen}
+          onClick={() => setInviteOpen(true)}
+          icon={<UserPlus className="h-5 w-5" aria-hidden="true" />}
+        />
+
         <DockButton
           label={
             layout === "gallery"
@@ -451,6 +481,12 @@ export function ControlDock({
           icon={<PhoneOff className="h-5 w-5" aria-hidden="true" />}
         />
       </div>
+
+      <InviteToCallModal
+        meetingCode={meetingCode}
+        open={inviteOpen}
+        onOpenChange={setInviteOpen}
+      />
     </div>
   );
 }

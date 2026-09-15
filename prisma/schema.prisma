@@ -37,6 +37,9 @@ model User {
   receivedRequests ConnectionRequest[] @relation("ConnectionReceiver")
   sentMessages     DirectMessage[]     @relation("MessageSender")
   receivedMessages DirectMessage[]     @relation("MessageReceiver")
+  sentCallInvites     CallInvite[]     @relation("CallInviteSender")
+  receivedCallInvites CallInvite[]     @relation("CallInviteReceiver")
+  waitingRoomEntries  WaitingRoomEntry[] @relation("WaitingGuest")
 }
 
 /// A one-to-one message. Only ever readable or writable by the two people named
@@ -108,6 +111,38 @@ model LinkPreview {
   @@index([updatedAt])
 }
 
+enum KnockStatus {
+  PENDING
+  ADMITTED
+  DENIED
+}
+
+/// Someone waiting for the host to let them into a meeting.
+///
+/// Deliberately not a `Participant` until admitted: enrolling on knock would let
+/// anyone with the link write themselves into attendance history and bypass the
+/// admission check on a later rejoin.
+model WaitingRoomEntry {
+  id        String      @id @default(cuid())
+  meetingId String
+  userId    String
+  status    KnockStatus @default(PENDING)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  /// Who answered. Null while pending.
+  decidedById String?
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user    User    @relation("WaitingGuest", fields: [userId], references: [id], onDelete: Cascade)
+
+  /// One row per person per meeting: re-knocking updates the existing request
+  /// rather than filling the host's queue with duplicates.
+  @@unique([meetingId, userId])
+  /// Serves the host's pending-queue poll.
+  @@index([meetingId, status])
+  @@index([userId, status])
+}
+
 model ConnectionRequest {
   id         String           @id @default(cuid())
   senderId   String
@@ -138,11 +173,57 @@ model Meeting {
   /// leaked code is not enough to join. Direct 1-on-1 calls are private; a
   /// meeting created to be shared by link is not.
   isPrivate       Boolean                 @default(false)
+  /// Six-digit room PIN for guests who are not enrolled participants.
+  ///
+  /// Stored in the clear on purpose: the host UI has to *display* it to share
+  /// it, which a hash cannot do. It is therefore a low-value, per-room secret,
+  /// not a credential — admission still requires a signed-in Clerk session, and
+  /// `authorizeMeetingJoin` rate limits attempts so six digits cannot be walked.
+  /// Nullable because meetings created before this column existed have none.
+  passcode        String?
+  /// When true, nobody new may mint a token. Existing participants are
+  /// unaffected, so locking does not eject the people already talking.
+  isLocked        Boolean                 @default(false)
+  /// When true, a non-participant who clears the passcode is placed in the
+  /// waiting room instead of being admitted, and needs the host to let them in.
+  waitingRoomEnabled Boolean              @default(false)
   host            User                    @relation("MeetingHost", fields: [hostId], references: [id], onDelete: Cascade)
   participants    Participant[]
+  callInvites     CallInvite[]
+  knocks          WaitingRoomEntry[]
   creationRequest MeetingCreationRequest?
 
   @@index([hostId])
+}
+
+/// A mid-call invitation that turns a 1-on-1 into a group call.
+///
+/// Separate from `Participant` because the two answer different questions:
+/// `Participant` is "who attended", this is "who was asked, and did they respond".
+/// Keeping them apart means a declined invite leaves no trace in attendance
+/// history, and the ringing query never has to guess why a row exists.
+model CallInvite {
+  id         String    @id @default(cuid())
+  meetingId  String
+  senderId   String
+  receiverId String
+  createdAt  DateTime  @default(now())
+  /// Set when the invitee joins. Stops the banner ringing for an answered call.
+  acceptedAt DateTime?
+  /// Set when the invitee declines. Also stops the ring, without implying they
+  /// ever joined.
+  dismissedAt DateTime?
+
+  meeting  Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  sender   User    @relation("CallInviteSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver User    @relation("CallInviteReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  /// One row per person per meeting, so re-inviting someone updates the existing
+  /// invite (re-ringing them) instead of stacking duplicates in the banner.
+  @@unique([meetingId, receiverId])
+  /// Serves the ringing poll, which filters by receiver and recency.
+  @@index([receiverId, createdAt])
+  @@index([meetingId])
 }
 
 model MeetingCreationRequest {

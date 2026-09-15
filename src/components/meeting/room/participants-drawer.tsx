@@ -8,12 +8,30 @@ import type { TrackReferenceOrPlaceholder } from "@livekit/components-react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import type { LocalParticipant, RemoteParticipant } from "livekit-client";
 import { Track } from "livekit-client";
-import { Crown, Hand, Video, VideoOff, Volume2, VolumeX, X } from "lucide-react";
+import {
+  Crown,
+  Hand,
+  MicOff,
+  UserPlus,
+  UserRoundX,
+  Video,
+  VideoOff,
+  Volume2,
+  VolumeX,
+  X,
+} from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 
+import {
+  muteOneParticipant,
+  removeFromMeeting,
+} from "@/app/meeting/[code]/moderation";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
+import { HostControls } from "./host-controls";
+import { InviteToCallModal } from "./invite-to-call-modal";
 import {
   ConnectionQualityIcon,
   MicrophoneStateIcon,
@@ -53,6 +71,9 @@ interface ParticipantRowProps {
   handPosition: number | null;
   volume: number;
   onVolumeChange: (identity: string, volume: number) => void;
+  /** Undefined for a non-host viewer, which is what hides the controls. */
+  onModerate?: (identity: string, action: "mute" | "remove") => Promise<void>;
+  moderating?: boolean;
 }
 
 function ParticipantRow({
@@ -61,7 +82,11 @@ function ParticipantRow({
   handPosition,
   volume,
   onVolumeChange,
+  onModerate,
+  moderating = false,
 }: ParticipantRowProps): React.JSX.Element {
+  /** Two-step, because removing someone mid-sentence is not undoable. */
+  const [confirmRemove, setConfirmRemove] = React.useState(false);
   const cameraRef = React.useMemo<TrackReferenceOrPlaceholder>(
     () => ({ participant, source: Track.Source.Camera }),
     [participant],
@@ -124,6 +149,64 @@ function ParticipantRow({
         </span>
       </div>
 
+      {onModerate !== undefined && (
+        <div className="mt-2 flex items-center gap-1.5 border-t border-white/[0.06] pt-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            disabled={moderating}
+            onClick={() => void onModerate(participant.identity, "mute")}
+            className="h-7 px-2 text-[11px] text-zinc-300 hover:bg-white/10 hover:text-white"
+            aria-label={`Mute ${label}`}
+          >
+            <MicOff className="h-3.5 w-3.5" aria-hidden="true" />
+            Mute
+          </Button>
+
+          {!confirmRemove ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={moderating}
+              onClick={() => setConfirmRemove(true)}
+              className="h-7 px-2 text-[11px] text-zinc-300 hover:bg-white/10 hover:text-red-300"
+              aria-label={`Remove ${label} from the meeting`}
+            >
+              <UserRoundX className="h-3.5 w-3.5" aria-hidden="true" />
+              Remove
+            </Button>
+          ) : (
+            <span className="flex items-center gap-1 text-[11px] text-zinc-400">
+              Remove?
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                disabled={moderating}
+                onClick={() => {
+                  setConfirmRemove(false);
+                  void onModerate(participant.identity, "remove");
+                }}
+                className="h-7 px-2 text-[11px]"
+              >
+                Yes
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => setConfirmRemove(false)}
+                className="h-7 px-2 text-[11px]"
+              >
+                No
+              </Button>
+            </span>
+          )}
+        </div>
+      )}
+
       {remote && (
         <div className="mt-2.5 flex items-center gap-2">
           <label htmlFor={sliderId} className="sr-only">
@@ -159,6 +242,13 @@ function ParticipantRow({
 }
 
 export interface ParticipantsDrawerProps {
+  /** Needed to invite people into *this* room. */
+  meetingCode: string;
+  /**
+   * Resolved on the server. Only controls whether the moderation UI renders —
+   * every action re-verifies host status itself.
+   */
+  isHost: boolean;
   open: boolean;
   onClose: () => void;
 }
@@ -170,8 +260,38 @@ export interface ParticipantsDrawerProps {
 export function ParticipantsDrawer({
   open,
   onClose,
+  meetingCode,
+  isHost,
 }: ParticipantsDrawerProps): React.JSX.Element {
   const participants = useParticipants();
+  const [inviteOpen, setInviteOpen] = React.useState(false);
+  const [moderating, setModerating] = React.useState<string | null>(null);
+
+  /** Server-side mute or removal, applied to one LiveKit identity. */
+  const moderate = React.useCallback(
+    async (
+      identity: string,
+      action: "mute" | "remove",
+    ): Promise<void> => {
+      setModerating(identity);
+
+      try {
+        const outcome =
+          action === "mute"
+            ? await muteOneParticipant(meetingCode, identity)
+            : await removeFromMeeting(meetingCode, identity);
+
+        if (outcome.ok) {
+          toast.success(outcome.message);
+        } else {
+          toast.error(outcome.message);
+        }
+      } finally {
+        setModerating(null);
+      }
+    },
+    [meetingCode],
+  );
   const hostIdentity = useHostIdentity(participants);
   const { raisedHands } = useReactions();
   const shouldReduceMotion = useReducedMotion() === true;
@@ -297,17 +417,38 @@ export function ParticipantsDrawer({
                 {participants.length}
               </span>
             </h2>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              onClick={onClose}
-              aria-label="Close participants"
-              className="h-8 w-8 text-zinc-400 hover:bg-white/10 hover:text-zinc-100"
-            >
-              <X className="h-4 w-4" />
-            </Button>
+            <div className="flex shrink-0 items-center gap-1">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setInviteOpen(true)}
+                className="h-8 border-white/15 bg-white/[0.06] px-2.5 text-xs text-zinc-100 hover:bg-white/[0.14] hover:text-white"
+                aria-label="Add people to this call"
+              >
+                <UserPlus className="h-3.5 w-3.5" aria-hidden="true" />
+                Add
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={onClose}
+                aria-label="Close participants"
+                className="h-8 w-8 text-zinc-400 hover:bg-white/10 hover:text-zinc-100"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
           </header>
+
+          <InviteToCallModal
+            meetingCode={meetingCode}
+            open={inviteOpen}
+            onOpenChange={setInviteOpen}
+          />
+
+          {isHost && <HostControls meetingCode={meetingCode} />}
 
           {raisedHands.length > 0 && (
             <p
@@ -330,6 +471,14 @@ export function ParticipantsDrawer({
                 handPosition={handQueue.get(participant.identity) ?? null}
                 volume={volumes[participant.identity] ?? 1}
                 onVolumeChange={handleVolumeChange}
+                // Moderation is offered only to the host, and never against
+                // themselves — the dock already owns self-mute.
+                onModerate={
+                  isHost && participant.identity !== hostIdentity
+                    ? moderate
+                    : undefined
+                }
+                moderating={moderating === participant.identity}
               />
             ))}
           </ul>

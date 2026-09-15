@@ -4,6 +4,7 @@ import { PhoneCall, PhoneOff, UserRound } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { respondToCallInvite } from "@/app/connections/actions";
 import { Button } from "@/components/ui/button";
 
 interface IncomingCall {
@@ -11,6 +12,8 @@ interface IncomingCall {
   callerName: string;
   callerUsername: string;
   createdAt: string;
+  /** A mid-call invite into an existing room rather than a fresh 1-on-1. */
+  isGroupInvite: boolean;
 }
 
 /**
@@ -69,6 +72,21 @@ function isIncomingCall(value: unknown): value is IncomingCall {
 }
 
 /**
+ * Narrows the optional flag without rejecting a payload that predates it.
+ *
+ * A rolling deploy can serve the old shape to a page already running the new
+ * code; treating the absent field as `false` degrades to the previous wording
+ * rather than dropping the ring entirely.
+ */
+function toIncomingCall(value: IncomingCall): IncomingCall {
+  return {
+    ...value,
+    isGroupInvite:
+      (value as unknown as Record<string, unknown>).isGroupInvite === true,
+  };
+}
+
+/**
  * Ringing banner for direct calls.
  *
  * Polls rather than holding a socket, matching how direct messages already work.
@@ -113,10 +131,12 @@ export function IncomingCallBanner() {
           ? (payload as { calls: unknown[] }).calls
           : [];
 
-      const next =
+      const found =
         list.filter(isIncomingCall).find(
           (entry) => !dismissedRef.current.has(entry.meetingCode),
         ) ?? null;
+
+      const next = found === null ? null : toIncomingCall(found);
 
       if (mountedRef.current) {
         setCall(next);
@@ -149,6 +169,11 @@ export function IncomingCallBanner() {
 
     dismissedRef.current.add(call.meetingCode);
     persistDismissed(dismissedRef.current);
+
+    // Also recorded server-side, so the invite stops ringing on this user's other
+    // devices. sessionStorage alone is per-tab.
+    void respondToCallInvite(call.meetingCode, "dismiss");
+
     setCall(null);
   }
 
@@ -161,6 +186,7 @@ export function IncomingCallBanner() {
     // ring for a call already answered.
     dismissedRef.current.add(call.meetingCode);
     persistDismissed(dismissedRef.current);
+    void respondToCallInvite(call.meetingCode, "accept");
 
     const target = `/meeting/${encodeURIComponent(call.meetingCode)}/lobby`;
     setCall(null);
@@ -187,7 +213,9 @@ export function IncomingCallBanner() {
 
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-semibold text-zinc-50">
-            {call.callerName} is calling
+            {call.isGroupInvite
+              ? `${call.callerName} invited you to a group call`
+              : `${call.callerName} is calling`}
           </p>
           <p className="truncate font-mono text-xs text-zinc-400">
             @{call.callerUsername}

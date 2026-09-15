@@ -10,6 +10,8 @@ import Link from "next/link";
 import { HeaderAuthControls } from "@/components/auth/header-auth-controls";
 import { IncomingCallBanner } from "@/components/calls/incoming-call-banner";
 import { NotificationsMenu } from "@/components/connections/notifications-menu";
+import { MarketingNav } from "@/components/marketing-nav";
+import { CallProvider } from "@/components/meeting/call-provider";
 import { MessagesNavLink } from "@/components/messages/messages-nav-link";
 import { ThemeProvider } from "@/components/theme/theme-provider";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
@@ -74,29 +76,7 @@ export default function RootLayout({
                 </span>
               </Link>
 
-              <nav
-                className="hidden items-center gap-7 text-sm text-muted-foreground lg:flex"
-                aria-label="Primary navigation"
-              >
-                <Link
-                  href="/#features"
-                  className="transition-colors hover:text-foreground"
-                >
-                  Features
-                </Link>
-                <Link
-                  href="/#how-it-works"
-                  className="transition-colors hover:text-foreground"
-                >
-                  How it works
-                </Link>
-                <Link
-                  href="/#security"
-                  className="transition-colors hover:text-foreground"
-                >
-                  Security
-                </Link>
-              </nav>
+              <MarketingNav />
 
               <div className="flex items-center gap-1.5 sm:gap-2.5">
                 <ThemeToggle />
@@ -114,7 +94,9 @@ export default function RootLayout({
           <SignedIn>
             <IncomingCallBanner />
           </SignedIn>
-          {children}
+          {/* Holds the LiveKit connection above the router, so navigating does
+              not tear the call down. */}
+          <CallProvider>{children}</CallProvider>
           <Toaster />
           </ThemeProvider>
         </body>

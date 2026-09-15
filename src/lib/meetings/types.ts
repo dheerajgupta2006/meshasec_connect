@@ -8,6 +8,15 @@
 
 export type MeetingMode = "instant" | "scheduled";
 
+/**
+ * Length of a room passcode.
+ *
+ * Declared here rather than in `meeting-code.ts` because that module is
+ * `server-only`; the lobby input and the invite modal both need this value on the
+ * client.
+ */
+export const ROOM_PASSCODE_DIGITS = 6;
+
 export type CreationFieldName = "title" | "mode" | "startsAt" | "endsAt";
 
 /** Exactly the client-controlled fields Req 10.3 permits, and nothing else. */

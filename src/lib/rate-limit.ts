@@ -42,6 +42,18 @@ export const RATE_LIMITS = {
    */
   linkPreview: { limit: 120, windowMs: 5 * 60 * 1000 },
   meetingToken: { limit: 30, windowMs: 5 * 60 * 1000 },
+  /**
+   * Wrong room-passcode attempts, keyed per meeting per user.
+   *
+   * A six-digit PIN is only 1,000,000 combinations, so constant-time comparison
+   * alone is not protection — the attempt budget is. Ten wrong guesses per
+   * fifteen minutes makes exhausting the space take centuries, while leaving
+   * plenty of room for someone fat-fingering a code from a chat message.
+   *
+   * Only *failed* attempts consume quota, so a guest who types it correctly is
+   * never throttled.
+   */
+  meetingPasscode: { limit: 10, windowMs: 15 * 60 * 1000 },
   startCall: { limit: 20, windowMs: 10 * 60 * 1000 },
 } as const satisfies Record<string, RateLimitRule>;
 
@@ -107,6 +119,29 @@ export function consumeRateLimit(
 
   existing.count += 1;
   return { allowed: true, retryAfterSeconds: 0 };
+}
+
+/**
+ * Returns one unit of quota.
+ *
+ * Used where the cost should only apply to failure: a room passcode consumes an
+ * attempt when wrong and refunds it when right, so a guest who mistypes once then
+ * succeeds is not left with a depleted budget.
+ *
+ * Never drops below zero, and does nothing once the window has already reset.
+ */
+export function refundRateLimit(
+  action: RateLimitAction,
+  subject: string,
+): void {
+  const key = `${action}:${subject}`;
+  const existing = windows.get(key);
+
+  if (existing === undefined || existing.resetAt <= Date.now()) {
+    return;
+  }
+
+  existing.count = Math.max(0, existing.count - 1);
 }
 
 /** Human-readable wait, for user-facing copy. */

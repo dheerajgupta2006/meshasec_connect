@@ -18,7 +18,10 @@ import {
   logOperationalFailure,
   type FailureStage,
 } from "@/lib/meetings/diagnostics";
-import { generateMeetingCode } from "@/lib/meetings/meeting-code";
+import {
+  generateMeetingCode,
+  generateRoomPasscode,
+} from "@/lib/meetings/meeting-code";
 import {
   MAX_CODE_ATTEMPTS,
   MAX_PROVISION_ATTEMPTS,
@@ -150,6 +153,11 @@ async function runAttemptLoop(
               title: input.normalizedTitle,
               hostId,
               meetingCode,
+              // Every meeting gets one, including open ones. An open meeting does
+              // not require it to join, but the host may still want to hand out a
+              // code, and generating it up front avoids a migration-style backfill
+              // the first time they ask for it.
+              passcode: generateRoomPasscode(),
               startsAt: input.mode === "scheduled" ? input.startsAt : null,
               endsAt: input.mode === "scheduled" ? input.endsAt : null,
             },

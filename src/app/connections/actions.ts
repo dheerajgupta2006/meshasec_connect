@@ -16,7 +16,11 @@ import {
   getConnectionState,
 } from "@/lib/connections/queries";
 import { sendConnectionRequestEmail } from "@/lib/email/connection-request-email";
-import { generateMeetingCode } from "@/lib/meetings/meeting-code";
+import { authorizeMeetingJoin } from "@/lib/meetings/authorization";
+import {
+  generateMeetingCode,
+  generateRoomPasscode,
+} from "@/lib/meetings/meeting-code";
 import { prisma } from "@/lib/prisma";
 import { consumeRateLimit, describeRetryAfter } from "@/lib/rate-limit";
 import { ensureCurrentUser, normalizeUsername } from "@/lib/users/current-user";
@@ -358,6 +362,9 @@ export async function startDirectCall(
           // Private: only these two may mint a token, so a leaked code is not
           // enough for a third party to listen in.
           isPrivate: true,
+          // The room PIN is what lets this 1-on-1 be widened later. A guest with
+          // the link still cannot enter a private room without it.
+          passcode: generateRoomPasscode(),
           participants: {
             create: [{ userId: me.id }, { userId: contact.id }],
           },
@@ -398,6 +405,271 @@ export async function startDirectCall(
     message: "We could not start that call. Please try again.",
     meetingCode: null,
   };
+}
+
+export interface InviteableFriend {
+  id: string;
+  username: string;
+  name: string | null;
+}
+
+export interface InviteableFriendsResult {
+  ok: boolean;
+  message: string;
+  friends: InviteableFriend[];
+  /** Null unless the caller is entitled to see it. */
+  passcode: string | null;
+}
+
+/**
+ * Accepted connections the caller can pull into a meeting they are already in.
+ *
+ * Membership of the meeting is required before anything is returned, so this
+ * cannot be used as a contact-list oracle against a room you are not in. People
+ * already enrolled are filtered out, because inviting them again would ring
+ * someone who is sitting in the call.
+ *
+ * The room passcode rides along in the same response: the modal needs it for its
+ * share tab, and fetching it separately would mean a second authorization check
+ * for the same question.
+ */
+export async function getInviteableFriends(
+  meetingCode: string,
+): Promise<InviteableFriendsResult> {
+  const empty = { friends: [], passcode: null };
+
+  const me = await ensureCurrentUser();
+
+  if (me === null) {
+    return { ok: false, message: SIGN_IN_REQUIRED, ...empty };
+  }
+
+  const decision = await authorizeMeetingJoin(meetingCode, me.id);
+
+  // Only an enrolled member may invite. `allowed` alone is not enough: an open
+  // meeting admits anyone holding the link, and a passer-by must not be able to
+  // enumerate the room or read its passcode.
+  if (!decision.allowed || !decision.enrolled) {
+    return {
+      ok: false,
+      message: "You must be in this meeting to invite people.",
+      ...empty,
+    };
+  }
+
+  const [meeting, connections] = await Promise.all([
+    prisma.meeting.findUnique({
+      where: { id: decision.meeting.id },
+      select: {
+        passcode: true,
+        participants: { select: { userId: true } },
+      },
+    }),
+    prisma.connectionRequest.findMany({
+      where: {
+        status: ConnectionStatus.ACCEPTED,
+        OR: [{ senderId: me.id }, { receiverId: me.id }],
+      },
+      select: {
+        sender: { select: { id: true, username: true, name: true } },
+        receiver: { select: { id: true, username: true, name: true } },
+      },
+    }),
+  ]);
+
+  if (meeting === null) {
+    return { ok: false, message: "That meeting no longer exists.", ...empty };
+  }
+
+  const alreadyIn = new Set(
+    meeting.participants.map((participant) => participant.userId),
+  );
+
+  const friends: InviteableFriend[] = [];
+  const seen = new Set<string>();
+
+  connections.forEach((row) => {
+    // A connection row names two people; the friend is whichever one is not me.
+    const other = row.sender.id === me.id ? row.receiver : row.sender;
+
+    // No username means no reachable profile, so there is nothing to show.
+    if (other.username === null) {
+      return;
+    }
+
+    if (other.id === me.id || alreadyIn.has(other.id) || seen.has(other.id)) {
+      return;
+    }
+
+    seen.add(other.id);
+    friends.push({
+      id: other.id,
+      username: other.username,
+      name: other.name,
+    });
+  });
+
+  friends.sort((first, second) =>
+    (first.name ?? first.username).localeCompare(
+      second.name ?? second.username,
+    ),
+  );
+
+  return {
+    ok: true,
+    message: friends.length === 0 ? "No one left to invite." : "",
+    friends,
+    passcode: meeting.passcode,
+  };
+}
+
+/**
+ * Invites an accepted connection into a meeting the caller is already in.
+ *
+ * Enrolls them as a `Participant` immediately, which is deliberate: it is what
+ * lets them join without a passcode prompt, and what makes the meeting appear in
+ * their dashboard history. The `CallInvite` row is separate and drives the
+ * ringing banner.
+ *
+ * Both writes go in one transaction so a rung invite can never point at a
+ * meeting the invitee is not enrolled on — that combination would ring them and
+ * then refuse them at the door.
+ */
+export async function inviteFriendToCall(
+  meetingCode: string,
+  friendUserId: string,
+): Promise<ActionResult> {
+  const me = await ensureCurrentUser();
+
+  if (me === null) {
+    return { ok: false, message: SIGN_IN_REQUIRED };
+  }
+
+  const throttled = rateLimited("startCall", me.id);
+
+  if (throttled !== null) {
+    return { ok: false, message: throttled };
+  }
+
+  if (friendUserId === me.id) {
+    return { ok: false, message: "You are already in this meeting." };
+  }
+
+  const decision = await authorizeMeetingJoin(meetingCode, me.id);
+
+  if (!decision.allowed || !decision.enrolled) {
+    return {
+      ok: false,
+      message: "You must be in this meeting to invite people.",
+    };
+  }
+
+  const friend = await prisma.user.findUnique({
+    where: { id: friendUserId },
+    select: { id: true, username: true },
+  });
+
+  if (friend === null) {
+    return { ok: false, message: "That person no longer exists." };
+  }
+
+  // Re-checked here rather than trusted from the list the client was shown: the
+  // connection could have been removed between rendering and clicking.
+  const connected = await areUsersConnected(me.id, friend.id);
+
+  if (!connected) {
+    return {
+      ok: false,
+      message: `You must be connected with @${
+        friend.username ?? "this user"
+      } to invite them.`,
+    };
+  }
+
+  const handle = friend.username ?? "them";
+
+  try {
+    await prisma.$transaction([
+      prisma.participant.upsert({
+        where: {
+          userId_meetingId: {
+            userId: friend.id,
+            meetingId: decision.meeting.id,
+          },
+        },
+        create: { userId: friend.id, meetingId: decision.meeting.id },
+        // Already enrolled is fine — they may have been invited before, or left
+        // and are being called back in.
+        update: {},
+        select: { id: true },
+      }),
+      prisma.callInvite.upsert({
+        where: {
+          meetingId_receiverId: {
+            meetingId: decision.meeting.id,
+            receiverId: friend.id,
+          },
+        },
+        create: {
+          meetingId: decision.meeting.id,
+          senderId: me.id,
+          receiverId: friend.id,
+        },
+        // Re-inviting re-rings: the timestamp moves into the ringing window and
+        // any previous accept/dismiss is cleared so the banner shows again.
+        update: {
+          senderId: me.id,
+          createdAt: new Date(),
+          acceptedAt: null,
+          dismissedAt: null,
+        },
+        select: { id: true },
+      }),
+    ]);
+  } catch (error: unknown) {
+    console.error("invite_friend_to_call_failed", {
+      message: error instanceof Error ? error.message : "unknown error",
+    });
+
+    return { ok: false, message: "We could not send that invite." };
+  }
+
+  refreshViews();
+
+  return { ok: true, message: `Invited @${handle}.` };
+}
+
+/**
+ * Marks a ringing invite as answered or declined so it stops ringing.
+ *
+ * Scoped to the receiver: you can only respond to an invite addressed to you.
+ * `updateMany` rather than `update` so an already-answered or unknown invite is a
+ * silent no-op instead of a thrown error on a fire-and-forget call.
+ */
+export async function respondToCallInvite(
+  meetingCode: string,
+  response: "accept" | "dismiss",
+): Promise<ActionResult> {
+  const me = await ensureCurrentUser();
+
+  if (me === null) {
+    return { ok: false, message: SIGN_IN_REQUIRED };
+  }
+
+  const now = new Date();
+
+  await prisma.callInvite.updateMany({
+    where: {
+      receiverId: me.id,
+      meeting: { is: { meetingCode } },
+      acceptedAt: null,
+      dismissedAt: null,
+    },
+    data:
+      response === "accept" ? { acceptedAt: now } : { dismissedAt: now },
+  });
+
+  return { ok: true, message: "" };
 }
 
 /**

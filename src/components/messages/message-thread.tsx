@@ -30,7 +30,10 @@ import {
   markThreadRead,
   sendDirectMessage,
 } from "@/app/messages/actions";
+import { LinkPreviewCard } from "@/components/messages/link-preview-card";
+import { MessageBody } from "@/components/messages/message-body";
 import { mintCreationRequestId } from "@/lib/meetings/creation-request-id";
+import { previewTarget } from "@/lib/messages/links";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -493,6 +496,11 @@ export function MessageThread({
             const isEditing = editingId === message.id;
             const canModify = message.outgoing && !message.deleted;
             const quoted = message.replyTo;
+            // Computed once per message. A deleted body is empty, so there is
+            // nothing to preview.
+            const linkTarget = message.deleted
+              ? null
+              : previewTarget(message.body);
 
             return (
               <div
@@ -612,9 +620,21 @@ export function MessageThread({
                       </p>
                     </form>
                   ) : (
-                    <p className="whitespace-pre-wrap break-words text-sm">
-                      {message.body}
-                    </p>
+                    <>
+                      <MessageBody
+                        body={message.body}
+                        outgoing={message.outgoing}
+                      />
+
+                      {/* One card per message, for the first link only. Several
+                          cards would dominate the thread. */}
+                      {linkTarget !== null && (
+                        <LinkPreviewCard
+                          url={linkTarget}
+                          outgoing={message.outgoing}
+                        />
+                      )}
+                    </>
                   )}
 
                   <p

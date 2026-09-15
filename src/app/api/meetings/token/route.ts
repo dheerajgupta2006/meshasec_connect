@@ -32,6 +32,22 @@ function readMeetingCode(value: unknown): string | null {
   return typeof body.meetingCode === "string" ? body.meetingCode : null;
 }
 
+/**
+ * Reads the optional room passcode.
+ *
+ * Absent and malformed both become null: `authorizeMeetingJoin` normalises and
+ * judges it, so this only has to avoid passing a non-string through.
+ */
+function readPasscode(value: unknown): string | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  const body = value as Record<string, unknown>;
+
+  return typeof body.passcode === "string" ? body.passcode : null;
+}
+
 function errorResponse(message: string, status: number): NextResponse {
   return NextResponse.json({ error: message }, { status });
 }
@@ -94,18 +110,63 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   try {
-    const decision = await authorizeMeetingJoin(meetingCode, me.id);
+    const decision = await authorizeMeetingJoin(
+      meetingCode,
+      me.id,
+      readPasscode(body),
+    );
 
     if (!decision.allowed) {
-      if (decision.reason === "not_found") {
-        return errorResponse("Meeting not found", 404);
+      switch (decision.reason) {
+        case "not_found":
+          return errorResponse("Meeting not found", 404);
+
+        // 401 rather than 403: the request is not permanently refused, it is
+        // missing a credential the client can go and collect. The lobby keys its
+        // passcode prompt off this `code`.
+        case "passcode_required":
+          return NextResponse.json(
+            {
+              error: "This room requires a passcode.",
+              code: "passcode_required",
+            },
+            { status: 401 },
+          );
+
+        case "passcode_invalid":
+          return NextResponse.json(
+            {
+              error: "That passcode is not correct.",
+              code: "passcode_invalid",
+            },
+            { status: 401 },
+          );
+
+        case "passcode_throttled": {
+          const retryAfter = decision.retryAfterSeconds ?? 60;
+
+          return NextResponse.json(
+            {
+              error: `Too many incorrect passcodes. Try again in ${describeRetryAfter(
+                retryAfter,
+              )}.`,
+              code: "passcode_throttled",
+            },
+            {
+              status: 429,
+              headers: { "Retry-After": String(retryAfter) },
+            },
+          );
+        }
+
+        default:
+          // Deliberately explicit rather than a 404: the caller is signed in and
+          // the meeting exists, they simply were not invited to it.
+          return errorResponse(
+            "You are not a participant in this meeting. Ask the host to invite you.",
+            403,
+          );
       }
-      // Deliberately explicit rather than a 404: the caller is signed in and the
-      // meeting exists, they simply were not invited to it.
-      return errorResponse(
-        "You are not a participant in this meeting. Ask the host to invite you.",
-        403,
-      );
     }
 
     // An open meeting joined by link enrolls the attendee, which is what makes

@@ -4,6 +4,7 @@ import { unstable_noStore as noStore } from "next/cache";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import { MessageSearch } from "@/components/messages/message-search";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -55,6 +56,9 @@ export default async function MessagesPage() {
             <Link href="/dashboard">Dashboard</Link>
           </Button>
         </header>
+
+        {/* Only offered once there is something to search. */}
+        {conversations.length > 0 && <MessageSearch />}
 
         {conversations.length === 0 ? (
           <Card className="border-dashed bg-card/60">
