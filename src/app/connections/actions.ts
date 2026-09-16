@@ -278,6 +278,40 @@ export async function respondToConnectionRequest(
 }
 
 /**
+ * Rings someone for a room that already exists.
+ *
+ * The direct-call ring is driven by `Meeting.createdAt`, which cannot be moved
+ * without rewriting history. A `CallInvite` carries its own timestamp, so this
+ * re-rings a reused room by refreshing that instead — and clears any previous
+ * accept or dismiss so the banner shows again.
+ *
+ * Never throws: failing to ring must not stop the caller entering the room.
+ */
+async function ringViaInvite(
+  meetingId: string,
+  senderId: string,
+  receiverId: string,
+): Promise<void> {
+  try {
+    await prisma.callInvite.upsert({
+      where: { meetingId_receiverId: { meetingId, receiverId } },
+      create: { meetingId, senderId, receiverId },
+      update: {
+        senderId,
+        createdAt: new Date(),
+        acceptedAt: null,
+        dismissedAt: null,
+      },
+      select: { id: true },
+    });
+  } catch (error: unknown) {
+    console.error("ring_via_invite_failed", {
+      message: error instanceof Error ? error.message : "unknown error",
+    });
+  }
+}
+
+/**
  * The security gate for calling. Creates a 1-on-1 meeting only when an ACCEPTED
  * connection exists, and enrolls both people so it appears on both dashboards.
  */
@@ -336,11 +370,19 @@ export async function startDirectCall(
         { hostId: contact.id, participants: { some: { userId: me.id } } },
       ],
     },
-    select: { meetingCode: true },
+    select: { id: true, meetingCode: true },
     orderBy: { createdAt: "desc" },
   });
 
   if (existing !== null) {
+    // Reusing a room means its `createdAt` is old, and the ringing query filters
+    // on exactly that — so without this the callee is never rung for any call
+    // after the first within the reuse window. An invite row carries its own
+    // timestamp, so refreshing it rings them again for the same room.
+    await ringViaInvite(existing.id, me.id, contact.id);
+
+    refreshViews();
+
     return {
       ok: true,
       message: `Joining your call with @${contact.username ?? "contact"}.`,

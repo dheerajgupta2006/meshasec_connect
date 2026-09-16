@@ -12,6 +12,7 @@ import {
   Crown,
   Hand,
   MicOff,
+  ShieldCheck,
   UserPlus,
   UserRoundX,
   Video,
@@ -27,16 +28,17 @@ import {
   muteOneParticipant,
   removeFromMeeting,
 } from "@/app/meeting/[code]/moderation";
+import { setCoHost } from "@/app/meeting/[code]/roles";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 import { HostControls } from "./host-controls";
 import { InviteToCallModal } from "./invite-to-call-modal";
+import { useMeetingRoles } from "./roles-provider";
 import {
   ConnectionQualityIcon,
   MicrophoneStateIcon,
   participantDisplayName,
-  useHostIdentity,
 } from "./participant-tile";
 import { useReactions } from "./reactions";
 
@@ -71,18 +73,23 @@ interface ParticipantRowProps {
   handPosition: number | null;
   volume: number;
   onVolumeChange: (identity: string, volume: number) => void;
-  /** Undefined for a non-host viewer, which is what hides the controls. */
+  /** Undefined when the viewer cannot moderate, which is what hides the controls. */
   onModerate?: (identity: string, action: "mute" | "remove") => Promise<void>;
+  /** Undefined unless the viewer owns the meeting. */
+  onSetCoHost?: (identity: string, makeCoHost: boolean) => Promise<void>;
+  isCoHost?: boolean;
   moderating?: boolean;
 }
 
 function ParticipantRow({
   participant,
   isHost,
+  isCoHost = false,
   handPosition,
   volume,
   onVolumeChange,
   onModerate,
+  onSetCoHost,
   moderating = false,
 }: ParticipantRowProps): React.JSX.Element {
   /** Two-step, because removing someone mid-sentence is not undoable. */
@@ -122,6 +129,15 @@ function ParticipantRow({
                 Host
               </span>
             )}
+            {isCoHost && !isHost && (
+              <span
+                title="Co-host: has moderation controls granted by the host"
+                className="inline-flex shrink-0 items-center gap-1 rounded-full bg-sky-400/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-300"
+              >
+                <ShieldCheck className="h-3 w-3" aria-hidden="true" />
+                Co-host
+              </span>
+            )}
           </span>
 
           {handPosition !== null && (
@@ -149,8 +165,31 @@ function ParticipantRow({
         </span>
       </div>
 
+      {(onModerate !== undefined || onSetCoHost !== undefined) && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-white/[0.06] pt-2">
+          {onSetCoHost !== undefined && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={moderating}
+              onClick={() => void onSetCoHost(participant.identity, !isCoHost)}
+              className="h-7 px-2 text-[11px] text-zinc-300 hover:bg-white/10 hover:text-sky-300"
+              aria-label={
+                isCoHost
+                  ? `Remove co-host from ${label}`
+                  : `Make ${label} a co-host`
+              }
+            >
+              <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+              {isCoHost ? "Remove co-host" : "Make co-host"}
+            </Button>
+          )}
+        </div>
+      )}
+
       {onModerate !== undefined && (
-        <div className="mt-2 flex items-center gap-1.5 border-t border-white/[0.06] pt-2">
+        <div className="mt-1.5 flex items-center gap-1.5">
           <Button
             type="button"
             size="sm"
@@ -244,11 +283,7 @@ function ParticipantRow({
 export interface ParticipantsDrawerProps {
   /** Needed to invite people into *this* room. */
   meetingCode: string;
-  /**
-   * Resolved on the server. Only controls whether the moderation UI renders —
-   * every action re-verifies host status itself.
-   */
-  isHost: boolean;
+
   open: boolean;
   onClose: () => void;
 }
@@ -261,11 +296,21 @@ export function ParticipantsDrawer({
   open,
   onClose,
   meetingCode,
-  isHost,
 }: ParticipantsDrawerProps): React.JSX.Element {
   const participants = useParticipants();
   const [inviteOpen, setInviteOpen] = React.useState(false);
   const [moderating, setModerating] = React.useState<string | null>(null);
+
+  // Authoritative, from the database. The old `useHostIdentity` guessed the host
+  // from the earliest connected participant, so the crown drifted to whoever was
+  // left when the real host hung up.
+  const {
+    hostIdentity,
+    isHost,
+    canModerate,
+    isCoHostIdentity,
+    refresh: refreshRoles,
+  } = useMeetingRoles();
 
   /** Server-side mute or removal, applied to one LiveKit identity. */
   const moderate = React.useCallback(
@@ -292,7 +337,27 @@ export function ParticipantsDrawer({
     },
     [meetingCode],
   );
-  const hostIdentity = useHostIdentity(participants);
+
+  /** Promotes or demotes a co-host, then re-reads roles so badges update now. */
+  const setRole = React.useCallback(
+    async (identity: string, makeCoHost: boolean): Promise<void> => {
+      setModerating(identity);
+
+      try {
+        const outcome = await setCoHost(meetingCode, identity, makeCoHost);
+
+        if (outcome.ok) {
+          toast.success(outcome.message);
+          refreshRoles();
+        } else {
+          toast.error(outcome.message);
+        }
+      } finally {
+        setModerating(null);
+      }
+    },
+    [meetingCode, refreshRoles],
+  );
   const { raisedHands } = useReactions();
   const shouldReduceMotion = useReducedMotion() === true;
 
@@ -448,7 +513,7 @@ export function ParticipantsDrawer({
             onOpenChange={setInviteOpen}
           />
 
-          {isHost && <HostControls meetingCode={meetingCode} />}
+          {canModerate && <HostControls meetingCode={meetingCode} />}
 
           {raisedHands.length > 0 && (
             <p
@@ -468,14 +533,21 @@ export function ParticipantsDrawer({
                 key={participant.sid}
                 participant={participant}
                 isHost={participant.identity === hostIdentity}
+                isCoHost={isCoHostIdentity(participant.identity)}
                 handPosition={handQueue.get(participant.identity) ?? null}
                 volume={volumes[participant.identity] ?? 1}
                 onVolumeChange={handleVolumeChange}
-                // Moderation is offered only to the host, and never against
-                // themselves — the dock already owns self-mute.
+                // Offered to the host and co-hosts, never against the host —
+                // delegated moderation must not be able to eject its source.
                 onModerate={
-                  isHost && participant.identity !== hostIdentity
+                  canModerate && participant.identity !== hostIdentity
                     ? moderate
+                    : undefined
+                }
+                // Appointing co-hosts is ownership, so host only.
+                onSetCoHost={
+                  isHost && participant.identity !== hostIdentity
+                    ? setRole
                     : undefined
                 }
                 moderating={moderating === participant.identity}

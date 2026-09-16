@@ -15,6 +15,10 @@ import {
   authorizeMeetingJoin,
   recordAttendance,
 } from "@/lib/meetings/authorization";
+import {
+  actingHostId,
+  applyHostSuccession,
+} from "@/lib/meetings/host-succession";
 import { ROOM_PASSCODE_DIGITS } from "@/lib/meetings/types";
 import { prisma } from "@/lib/prisma";
 import { describeRetryAfter } from "@/lib/rate-limit";
@@ -67,6 +71,23 @@ export async function leaveMeeting(
       },
       data: { leftAt: new Date() },
     });
+
+    // If the person leaving was running the meeting, hand the role to whoever is
+    // still in the room. Without this the remaining participants would be left
+    // with nobody able to mute, admit or remove anyone.
+    const meeting = await prisma.meeting.findUnique({
+      where: { id: decision.meeting.id },
+      select: {
+        id: true,
+        meetingCode: true,
+        hostId: true,
+        currentHostId: true,
+      },
+    });
+
+    if (meeting !== null && actingHostId(meeting) === me.id) {
+      await applyHostSuccession(meeting).catch(() => undefined);
+    }
 
     revalidatePath("/dashboard");
 

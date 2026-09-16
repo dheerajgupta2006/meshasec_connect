@@ -18,6 +18,7 @@ import {
   muteParticipant,
   removeOccupant,
 } from "@/lib/meetings/livekit-admin";
+import { actingHostId } from "@/lib/meetings/host-succession";
 import { prisma } from "@/lib/prisma";
 import { ensureCurrentUser } from "@/lib/users/current-user";
 
@@ -39,16 +40,28 @@ interface HostContext {
   /** Clerk subject, which is what LiveKit uses as the participant identity. */
   hostClerkId: string | null;
   localUserId: string;
+  /** True only for the meeting owner, false for a co-host. */
+  isOwner: boolean;
 }
 
 /**
- * Resolves the caller and proves they host `meetingCode`.
+ * Resolves the caller and proves they may moderate `meetingCode`.
  *
- * Returns null on any failure so callers cannot accidentally treat a refusal as
- * success. The refusal message is intentionally the same for "not the host" and
- * "no such meeting": distinguishing them would let anyone probe meeting codes.
+ * `level` separates the two tiers deliberately:
+ * - `"moderator"` admits the host *and* co-hosts. Muting, removing, locking and
+ *   admitting are all delegated powers.
+ * - `"owner"` admits only the host. Ending the meeting and appointing co-hosts are
+ *   ownership, not moderation — a co-host who could do either would be able to
+ *   close someone else's meeting or make the role self-propagating.
+ *
+ * Returns null on any failure so a caller cannot mistake a refusal for success.
+ * The refusal message is intentionally identical for "not permitted" and "no such
+ * meeting", so meeting codes cannot be probed.
  */
-async function requireHost(meetingCode: string): Promise<HostContext | null> {
+async function requireHost(
+  meetingCode: string,
+  level: "owner" | "moderator" = "moderator",
+): Promise<HostContext | null> {
   const me = await ensureCurrentUser();
 
   if (me === null) {
@@ -61,19 +74,46 @@ async function requireHost(meetingCode: string): Promise<HostContext | null> {
       id: true,
       meetingCode: true,
       hostId: true,
-      host: { select: { clerkId: true } },
+      currentHostId: true,
+      participants: {
+        where: { userId: me.id, isCoHost: true },
+        select: { id: true },
+        take: 1,
+      },
     },
   });
 
-  if (meeting === null || meeting.hostId !== me.id) {
+  if (meeting === null) {
     return null;
   }
+
+  // The acting host, which may be a successor rather than the creator.
+  const actingId = actingHostId(meeting);
+  const isOwner = actingId === me.id;
+  const isCreator = meeting.hostId === me.id;
+  const isCoHost = meeting.participants.length > 0;
+
+  if (level === "owner" && !isOwner) {
+    return null;
+  }
+
+  // The creator keeps moderation rights after handing the room over: opening a
+  // meeting must never leave you unable to moderate it.
+  if (!isOwner && !isCreator && !isCoHost) {
+    return null;
+  }
+
+  const acting = await prisma.user.findUnique({
+    where: { id: actingId },
+    select: { clerkId: true },
+  });
 
   return {
     meetingId: meeting.id,
     meetingCode: meeting.meetingCode,
-    hostClerkId: meeting.host.clerkId,
+    hostClerkId: acting?.clerkId ?? null,
     localUserId: me.id,
+    isOwner,
   };
 }
 
@@ -94,9 +134,13 @@ export async function muteAllParticipants(
     };
   }
 
+  // Excludes whoever ran the command, not the owner: a co-host muting the room
+  // should not silence themselves while leaving the host talking.
+  const me = await ensureCurrentUser();
+
   const outcome = await muteEveryoneElse(
     host.meetingCode,
-    host.hostClerkId ?? "",
+    me?.clerkId ?? host.hostClerkId ?? "",
   );
 
   return outcome.ok
@@ -116,9 +160,14 @@ export async function muteOneParticipant(
   }
 
   if (identity === host.hostClerkId) {
-    // The dock already has a mic button; routing self-mute through moderation
-    // would be a confusing second path to the same state.
-    return { ok: false, message: "Use the microphone button to mute yourself." };
+    return {
+      ok: false,
+      // The dock already has a mic button; routing self-mute through moderation
+      // would be a confusing second path to the same state.
+      message: host.isOwner
+        ? "Use the microphone button to mute yourself."
+        : "Only the host can mute the host.",
+    };
   }
 
   const outcome = await muteParticipant(host.meetingCode, identity);
@@ -149,8 +198,16 @@ export async function removeFromMeeting(
     return { ok: false, message: NOT_HOST };
   }
 
+  // Covers two cases at once: the owner cannot remove themselves, and a co-host
+  // cannot remove the owner. Delegated moderation must not be able to eject the
+  // person who delegated it.
   if (identity === host.hostClerkId) {
-    return { ok: false, message: "You cannot remove yourself." };
+    return {
+      ok: false,
+      message: host.isOwner
+        ? "You cannot remove yourself."
+        : "Only the host can do that.",
+    };
   }
 
   // LiveKit identity is the Clerk subject, so the local user is resolved from it.
@@ -253,6 +310,8 @@ export async function setWaitingRoom(
 
 export interface MeetingModerationState {
   ok: boolean;
+  /** True only for the meeting owner. Co-hosts moderate but do not own. */
+  isOwner: boolean;
   isLocked: boolean;
   waitingRoomEnabled: boolean;
   moderationAvailable: boolean;
@@ -268,6 +327,7 @@ export async function getModerationState(
   meetingCode: string,
 ): Promise<MeetingModerationState> {
   const empty = {
+    isOwner: false,
     isLocked: false,
     waitingRoomEnabled: false,
     moderationAvailable: false,
@@ -303,6 +363,7 @@ export async function getModerationState(
 
   return {
     ok: true,
+    isOwner: host.isOwner,
     isLocked: meeting.isLocked,
     waitingRoomEnabled: meeting.waitingRoomEnabled,
     moderationAvailable: moderationConfigured(),

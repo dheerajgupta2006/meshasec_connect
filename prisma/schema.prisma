@@ -40,6 +40,7 @@ model User {
   sentCallInvites     CallInvite[]     @relation("CallInviteSender")
   receivedCallInvites CallInvite[]     @relation("CallInviteReceiver")
   waitingRoomEntries  WaitingRoomEntry[] @relation("WaitingGuest")
+  currentlyHosting    Meeting[]          @relation("MeetingCurrentHost")
 }
 
 /// A one-to-one message. Only ever readable or writable by the two people named
@@ -187,6 +188,16 @@ model Meeting {
   /// When true, a non-participant who clears the passcode is placed in the
   /// waiting room instead of being admitted, and needs the host to let them in.
   waitingRoomEnabled Boolean              @default(false)
+  /// Whoever is running the meeting right now.
+  ///
+  /// Separate from `hostId`, which records who created it and never changes —
+  /// that is what the dashboard reports and what meeting history is attributed
+  /// to. This one moves: when the acting host leaves and other people are still
+  /// talking, it transfers to the longest-present participant so the room is
+  /// never left without moderation. Null means nobody has taken over, so the
+  /// creator is still the acting host.
+  currentHostId   String?
+  currentHost     User?                   @relation("MeetingCurrentHost", fields: [currentHostId], references: [id], onDelete: SetNull)
   host            User                    @relation("MeetingHost", fields: [hostId], references: [id], onDelete: Cascade)
   participants    Participant[]
   callInvites     CallInvite[]
@@ -194,6 +205,7 @@ model Meeting {
   creationRequest MeetingCreationRequest?
 
   @@index([hostId])
+  @@index([currentHostId])
 }
 
 /// A mid-call invitation that turns a 1-on-1 into a group call.
@@ -246,9 +258,16 @@ model Participant {
   meetingId String
   joinedAt  DateTime  @default(now())
   leftAt    DateTime?
+  /// Granted by the host during a call. A co-host gets the moderation controls
+  /// but not ownership: they cannot end the meeting or manage other co-hosts.
+  ///
+  /// Lives on `Participant` rather than its own table so it disappears with the
+  /// enrollment — removing someone necessarily revokes their co-host rights.
+  isCoHost  Boolean   @default(false)
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   meeting   Meeting   @relation(fields: [meetingId], references: [id], onDelete: Cascade)
 
   @@unique([userId, meetingId])
   @@index([meetingId])
+  @@index([meetingId, isCoHost])
 }

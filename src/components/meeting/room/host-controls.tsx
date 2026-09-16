@@ -44,6 +44,7 @@ const POLL_INTERVAL_MS = 5000;
 
 const EMPTY: MeetingModerationState = {
   ok: false,
+  isOwner: false,
   isLocked: false,
   waitingRoomEnabled: false,
   moderationAvailable: false,
@@ -145,7 +146,7 @@ export function HostControls({ meetingCode }: HostControlsProps) {
     >
       <h3 className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-400">
         <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
-        Host controls
+        {state.isOwner ? "Host controls" : "Co-host controls"}
       </h3>
 
       <div className="grid grid-cols-1 gap-1.5">
@@ -209,10 +210,11 @@ export function HostControls({ meetingCode }: HostControlsProps) {
         </Button>
       </div>
 
-      {/* Ending is deliberately explicit. Leaving the page, or even pressing
-          Leave, no longer ends the meeting for everyone — this button is the only
-          thing that does, so a host can step away and come back. */}
-      {!confirmEnd ? (
+      {/* Ending is deliberately explicit, and owner-only. Leaving the page, or
+          even pressing Leave, no longer ends the meeting for everyone — this
+          button is the only thing that does, so a host can step away and come
+          back. A co-host moderates but does not own, so cannot close the room. */}
+      {!state.isOwner ? null : !confirmEnd ? (
         <Button
           type="button"
           size="sm"

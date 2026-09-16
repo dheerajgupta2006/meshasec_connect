@@ -3,7 +3,6 @@
 import {
   isTrackReference,
   useLocalParticipant,
-  useParticipants,
   useSpeakingParticipants,
   useTracks,
 } from "@livekit/components-react";
@@ -18,8 +17,8 @@ import {
   ParticipantVideoTile,
   participantDisplayName,
   trackReferenceKey,
-  useHostIdentity,
 } from "./participant-tile";
+import { useMeetingRoles } from "./roles-provider";
 
 export type LayoutMode = "gallery" | "speaker";
 
@@ -106,9 +105,10 @@ function useDominantSpeakerIdentity(): string | null {
 }
 
 export function VideoGrid({ layout, className }: VideoGridProps): React.JSX.Element {
-  const participants = useParticipants();
   const { localParticipant } = useLocalParticipant();
-  const hostIdentity = useHostIdentity(participants);
+  // From the database, not inferred. A guessed host moved the crown to whoever
+  // remained after the real host left.
+  const { hostIdentity } = useMeetingRoles();
   const dominantSpeaker = useDominantSpeakerIdentity();
 
   const [mirrorLocal, setMirrorLocal] = React.useState(true);

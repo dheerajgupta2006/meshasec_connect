@@ -8,6 +8,7 @@ import { ChatDrawer } from "@/components/meeting/room/chat-drawer";
 import { ControlDock } from "@/components/meeting/room/control-dock";
 import type { DrawerId } from "@/components/meeting/room/control-dock";
 import { ParticipantsDrawer } from "@/components/meeting/room/participants-drawer";
+import { MeetingRolesProvider } from "@/components/meeting/room/roles-provider";
 import { VideoGrid } from "@/components/meeting/room/video-grid";
 import type { LayoutMode } from "@/components/meeting/room/video-grid";
 import { Button } from "@/components/ui/button";
@@ -31,11 +32,9 @@ interface MeetingRoomProps {
 function MeetingStage({
   meetingTitle,
   meetingCode,
-  isHost,
 }: {
   meetingTitle: string;
   meetingCode: string;
-  isHost: boolean;
 }) {
   const { session } = useCall();
   const [layout, setLayout] = useState<LayoutMode>("gallery");
@@ -46,6 +45,7 @@ function MeetingStage({
   }, []);
 
   return (
+    <MeetingRolesProvider meetingCode={meetingCode}>
     <div className="relative flex h-full w-full flex-col overflow-hidden bg-zinc-950 text-zinc-100">
       <header className="flex shrink-0 items-center gap-3 px-3 py-2 sm:px-5 sm:py-3">
         <h1 className="truncate text-sm font-semibold tracking-tight sm:text-base">
@@ -74,9 +74,9 @@ function MeetingStage({
         open={activeDrawer === "participants"}
         onClose={closeDrawer}
         meetingCode={meetingCode}
-        isHost={isHost}
       />
     </div>
+    </MeetingRolesProvider>
   );
 }
 
@@ -173,11 +173,9 @@ export function MeetingRoom({
 
   return (
     <div className="h-[calc(100vh-4rem)] w-full bg-zinc-950">
-      <MeetingStage
-        meetingTitle={meetingTitle}
-        meetingCode={meetingCode}
-        isHost={isHost}
-      />
+      {/* Roles come from `MeetingRolesProvider`, not from this prop: they change
+          mid-call when the host appoints a co-host. */}
+      <MeetingStage meetingTitle={meetingTitle} meetingCode={meetingCode} />
     </div>
   );
 }

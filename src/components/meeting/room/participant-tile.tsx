@@ -346,11 +346,16 @@ function readHostFromMetadata(metadata: string | undefined): string | null {
 }
 
 /**
- * Identity of the meeting host.
+ * Identity of the meeting host, guessed from the room.
  *
- * Room metadata wins when it names a host. The token endpoint does not set
- * metadata today, so the fallback is the earliest participant still in the
- * room, which is the person who opened it.
+ * @deprecated Superseded by `useMeetingRoles`, which reads the host from the
+ * database. The fallback below — the earliest participant still connected — is
+ * wrong the moment the real host leaves: the crown moved to whoever remained,
+ * while the moderation controls stayed with the actual owner, so the badge and
+ * the permissions disagreed.
+ *
+ * Kept only so nothing silently loses a host badge if a caller is missed; it has
+ * no remaining callers and should be deleted once that is certain.
  */
 export function useHostIdentity(participants: readonly Participant[]): string | null {
   const { metadata } = useRoomInfo();

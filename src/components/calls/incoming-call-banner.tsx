@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { respondToCallInvite } from "@/app/connections/actions";
 import { Button } from "@/components/ui/button";
+import { useRingtone } from "@/hooks/use-ringtone";
 
 interface IncomingCall {
   meetingCode: string;
@@ -17,11 +18,14 @@ interface IncomingCall {
 }
 
 /**
- * Poll cadence. Every tick is a database round trip, so this is deliberately
- * unhurried — a few seconds of ring latency costs far less than saturating the
- * connection pool.
+ * Poll cadence.
+ *
+ * Every tick is a database round trip, but a ring is the one notification where
+ * latency is obvious: the caller is sitting there waiting. Ten seconds felt
+ * broken, so this is tightened — and the poll is skipped entirely while the tab is
+ * hidden, which keeps the cost close to what it was.
  */
-const POLL_INTERVAL_MS = 10_000;
+const POLL_INTERVAL_MS = 4000;
 const DISMISSED_STORAGE_KEY = "meshasec:dismissed-calls";
 
 function readDismissed(): Set<string> {
@@ -156,11 +160,36 @@ export function IncomingCallBanner() {
       void poll();
     }, POLL_INTERVAL_MS);
 
+    /**
+     * Catch up the moment the tab is looked at again.
+     *
+     * This is what fixes "I only see the call after refreshing". Browsers throttle
+     * `setInterval` heavily in background tabs — often to once a minute, sometimes
+     * suspending it entirely — so a call placed while the tab was in the
+     * background could go unnoticed until the 90-second ringing window had already
+     * expired. Reloading worked only because it re-ran the initial poll.
+     */
+    function handleVisibility() {
+      if (document.visibilityState === "visible") {
+        void poll();
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibility);
+    // A backgrounded window is not always `hidden`, so focus is a second signal.
+    window.addEventListener("focus", handleVisibility);
+
     return () => {
       mountedRef.current = false;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("focus", handleVisibility);
     };
   }, [poll]);
+
+  // Rings while a call is on screen. Silent if the browser refuses audio before
+  // the user has interacted with the page; the banner still shows either way.
+  useRingtone(call !== null);
 
   function dismiss(): void {
     if (call === null) {
