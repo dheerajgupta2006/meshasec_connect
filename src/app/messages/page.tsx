@@ -4,6 +4,7 @@ import { unstable_noStore as noStore } from "next/cache";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import { LocalDateTime } from "@/components/local-date-time";
 import { MessageSearch } from "@/components/messages/message-search";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,10 +17,8 @@ export const metadata: Metadata = {
   title: "Messages",
 };
 
-const dayFormatter = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-});
+// Formatted by `LocalDateTime` on the client. Doing it here would use the
+// server's time zone, which is UTC on Vercel.
 
 export default async function MessagesPage() {
   noStore();
@@ -96,9 +95,12 @@ export default async function MessagesPage() {
                             `@${conversation.person.username}`}
                         </p>
                         {conversation.lastMessageAt !== null && (
-                          <span className="shrink-0 text-xs text-muted-foreground">
-                            {dayFormatter.format(conversation.lastMessageAt)}
-                          </span>
+                          <LocalDateTime
+                            iso={conversation.lastMessageAt.toISOString()}
+                            mode="dayMonth"
+                            fallback=""
+                            className="shrink-0 text-xs text-muted-foreground"
+                          />
                         )}
                       </div>
 

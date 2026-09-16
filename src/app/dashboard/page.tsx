@@ -19,6 +19,7 @@ import {
 } from "@/lib/meetings/lifecycle";
 import { listActiveRooms } from "@/lib/meetings/livekit-admin";
 import { AddToCalendar } from "@/components/calendar/add-to-calendar";
+import { LocalDateTime } from "@/components/local-date-time";
 import { ConnectDialog } from "@/components/connections/connect-dialog";
 import {
   ContactsList,
@@ -50,13 +51,9 @@ interface DashboardMeeting {
   };
 }
 
-const dateFormatter = new Intl.DateTimeFormat("en-US", {
-  dateStyle: "medium",
-});
-
-const timeFormatter = new Intl.DateTimeFormat("en-US", {
-  timeStyle: "short",
-});
+// Date formatting deliberately lives in `LocalDateTime`, a client component.
+// Formatting here would use the server's time zone — UTC on Vercel — and show
+// every meeting five and a half hours early for a viewer in India.
 
 // Sorting now lives in `lib/meetings/lifecycle.ts` alongside the status rule, so
 // the two cannot drift apart.
@@ -157,9 +154,9 @@ function MeetingCard({
             />
             <dt className="sr-only">Date</dt>
             <dd className="min-w-0 truncate text-zinc-200">
-              {dateFormatter.format(scheduledFor)}
+              <LocalDateTime iso={scheduledFor.toISOString()} mode="date" />
               <span className="text-zinc-500"> · </span>
-              {timeFormatter.format(scheduledFor)}
+              <LocalDateTime iso={scheduledFor.toISOString()} mode="time" />
             </dd>
           </div>
           <div className="flex items-center gap-2.5">
@@ -169,11 +166,19 @@ function MeetingCard({
             />
             <dt className="sr-only">Duration</dt>
             <dd className="min-w-0 truncate text-xs text-zinc-400">
-              {meeting.endsAt
-                ? `Ends ${timeFormatter.format(meeting.endsAt)}`
-                : meeting.startsAt
-                  ? "No end time set"
-                  : "Instant meeting"}
+              {meeting.endsAt !== null ? (
+                <>
+                  Ends{" "}
+                  <LocalDateTime
+                    iso={meeting.endsAt.toISOString()}
+                    mode="time"
+                  />
+                </>
+              ) : meeting.startsAt !== null ? (
+                "No end time set"
+              ) : (
+                "Instant meeting"
+              )}
             </dd>
           </div>
           <div className="flex items-center gap-2.5">
