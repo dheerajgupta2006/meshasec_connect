@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { meetingDescription } from "@/lib/brand";
 import { buildIcsCalendar, icsFilename } from "@/lib/calendar/ics";
 import { authorizeMeetingJoin } from "@/lib/meetings/authorization";
 import { prisma } from "@/lib/prisma";
@@ -74,7 +75,7 @@ export async function GET(
     // instead of creating a duplicate.
     uid: `meeting-${meeting.id}@meshasec`,
     title: meeting.title,
-    description: `Meshasec Connext meeting. Code: ${decision.meeting.meetingCode}`,
+    description: meetingDescription(decision.meeting.meetingCode),
     url: joinUrl,
     // An instant meeting has no `startsAt`; its creation time is when it opened.
     startsAt: meeting.startsAt ?? meeting.createdAt,

@@ -21,7 +21,9 @@ export type EmailOutcome =
   | { delivered: true }
   | { delivered: false; reason: "not_configured" | "failed" };
 
-const APP_NAME = "Meshasec Connext";
+// Imported rather than redeclared: this string reaches people's inboxes, and it
+// used to disagree with the name in the app's own header.
+import { APP_NAME } from "@/lib/brand";
 
 function appUrl(): string {
   const configured =

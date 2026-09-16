@@ -7,6 +7,7 @@ import { toast } from "sonner";
 
 import { AddToCalendar } from "@/components/calendar/add-to-calendar";
 import { Button } from "@/components/ui/button";
+import { APP_NAME } from "@/lib/brand";
 import {
   Dialog,
   DialogContent,
@@ -169,7 +170,7 @@ export function InviteModal({
               meetingCode={meetingCode}
               title={
                 meetingTitle === null || meetingTitle.length === 0
-                  ? "Meshasec Connext meeting"
+                  ? `${APP_NAME} meeting`
                   : meetingTitle
               }
               startsAt={startsAt}

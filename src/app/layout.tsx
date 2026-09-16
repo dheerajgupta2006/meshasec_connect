@@ -17,6 +17,8 @@ import { PushToggle } from "@/components/notifications/push-toggle";
 import { ThemeProvider } from "@/components/theme/theme-provider";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { Toaster } from "@/components/ui/sonner";
+import { APP_DESCRIPTION, APP_NAME, APP_TAGLINE } from "@/lib/brand";
+import { configuredAppOrigin } from "@/lib/meetings/app-origin";
 
 import "./globals.css";
 
@@ -32,12 +34,36 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
+  // Required for `opengraph-image` to be advertised as an absolute URL. Without
+  // it Next emits a relative path, which most chat apps will not fetch — so the
+  // preview card silently never appears.
+  metadataBase: new URL(configuredAppOrigin() ?? "http://localhost:3000"),
   title: {
-    default: "Meshasec Connect — Meetings that move work forward",
-    template: "%s | Meshasec Connect",
+    default: `${APP_NAME} — ${APP_TAGLINE}`,
+    template: `%s | ${APP_NAME}`,
   },
-  description:
-    "Secure, high-quality video meetings with a focused pre-join experience and effortless collaboration.",
+  description: APP_DESCRIPTION,
+  applicationName: APP_NAME,
+  openGraph: {
+    type: "website",
+    siteName: APP_NAME,
+    title: `${APP_NAME} — ${APP_TAGLINE}`,
+    description: APP_DESCRIPTION,
+  },
+  twitter: {
+    // Large image, because a meeting link pasted into a chat is the main way this
+    // app is shared and a thumbnail-sized card wastes the space.
+    card: "summary_large_image",
+    title: `${APP_NAME} — ${APP_TAGLINE}`,
+    description: APP_DESCRIPTION,
+  },
+  robots: {
+    index: true,
+    follow: true,
+    // Meeting and message routes are behind auth, but telling crawlers not to
+    // archive anything avoids a stale snapshot of a shared link.
+    googleBot: { index: true, follow: true, noarchive: true },
+  },
 };
 
 export default function RootLayout({

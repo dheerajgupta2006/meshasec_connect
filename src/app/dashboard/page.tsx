@@ -6,6 +6,7 @@ import {
   History,
   Plus,
   Sparkles,
+  MessageSquare,
   Users,
   Video,
 } from "lucide-react";
@@ -256,9 +257,38 @@ function EmptyMeetings({ type }: { type: "upcoming" | "past" | "ongoing" }) {
       </h3>
       <p className="mx-auto mt-1 max-w-sm text-sm text-zinc-400">
         {type === "upcoming"
-          ? "Create a meeting or join one with a meeting code to see it here."
+          ? "Start a meeting now, or schedule one for later."
           : "Meetings you have completed will appear here."}
       </p>
+
+      {/* An empty state is a new user's first screen, so it names the next step
+          rather than dead-ending. Only for "upcoming": there is no action that
+          produces past meetings. */}
+      {type === "upcoming" && (
+        <div className="mt-6 flex flex-col items-center justify-center gap-2 sm:flex-row">
+          <Button
+            asChild
+            size="sm"
+            className="h-10 w-full bg-gradient-to-r from-indigo-500 to-violet-500 text-white hover:from-indigo-400 hover:to-violet-400 sm:w-auto"
+          >
+            <Link href="/meeting/new">
+              <Video className="h-4 w-4" aria-hidden="true" />
+              New meeting
+            </Link>
+          </Button>
+          <Button
+            asChild
+            size="sm"
+            variant="outline"
+            className="h-10 w-full border-white/15 bg-white/[0.06] text-zinc-200 hover:bg-white/[0.12] hover:text-white sm:w-auto"
+          >
+            <Link href="/messages">
+              <MessageSquare className="h-4 w-4" aria-hidden="true" />
+              Message a contact
+            </Link>
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

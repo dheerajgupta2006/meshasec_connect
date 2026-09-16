@@ -9,6 +9,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { meetingDescription } from "@/lib/brand";
 import {
   buildGoogleCalendarUrl,
   buildOutlookCalendarUrl,
@@ -69,7 +70,7 @@ export function AddToCalendar({
 
   const linkInput = {
     title,
-    description: `Meshasec Connext meeting. Code: ${meetingCode}`,
+    description: meetingDescription(meetingCode),
     url: joinUrl,
     startsAt: start,
     endsAt: end,

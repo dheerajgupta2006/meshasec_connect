@@ -28,6 +28,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { APP_NAME } from "@/lib/brand";
 import { formatPasscodeForDisplay } from "@/lib/meetings/passcode";
 
 interface InviteToCallModalProps {
@@ -124,7 +125,7 @@ export function InviteToCallModal({
   }, [meetingCode]);
 
   const fullInvitation = useMemo(() => {
-    const lines = ["You are invited to a Meshasec Connext meeting.", ""];
+    const lines = [`You are invited to a ${APP_NAME} meeting.`, ""];
 
     if (meetingUrl.length > 0) {
       lines.push(`Join: ${meetingUrl}`);
