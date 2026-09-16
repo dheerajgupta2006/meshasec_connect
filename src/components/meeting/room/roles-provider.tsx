@@ -14,7 +14,7 @@ import {
  * carrying that to the other participants — so it is polled. Unhurried, because a
  * few seconds of delay before a co-host badge appears costs nothing.
  */
-const POLL_INTERVAL_MS = 8000;
+const POLL_INTERVAL_MS = 5000;
 
 const EMPTY: MeetingRoles = {
   ok: false,
@@ -107,7 +107,23 @@ export function MeetingRolesProvider({
       }
     }, POLL_INTERVAL_MS);
 
-    return () => window.clearInterval(timer);
+    // Background tabs have their timers throttled to roughly once a minute, so a
+    // promotion granted while the tab was hidden would not appear for a long time.
+    // Re-reading on focus makes it appear as soon as the tab is looked at.
+    function handleVisibility() {
+      if (document.visibilityState === "visible") {
+        refresh();
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("focus", handleVisibility);
+
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("focus", handleVisibility);
+    };
   }, [refresh]);
 
   const value = React.useMemo<RolesContextValue>(() => {

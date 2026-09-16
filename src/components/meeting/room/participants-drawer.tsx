@@ -307,6 +307,7 @@ export function ParticipantsDrawer({
   const {
     hostIdentity,
     isHost,
+    isCoHost: viewerIsCoHost,
     canModerate,
     isCoHostIdentity,
     refresh: refreshRoles,
@@ -532,8 +533,21 @@ export function ParticipantsDrawer({
               <ParticipantRow
                 key={participant.sid}
                 participant={participant}
-                isHost={participant.identity === hostIdentity}
-                isCoHost={isCoHostIdentity(participant.identity)}
+                // For your own row the answer comes straight from the server's
+                // view of *you*, not from matching your LiveKit identity against a
+                // list. The comparison is the fragile part — if the two ever
+                // disagree, the person who was just promoted is the one who cannot
+                // see their own badge, which is exactly the reported symptom.
+                isHost={
+                  participant.isLocal
+                    ? isHost
+                    : participant.identity === hostIdentity
+                }
+                isCoHost={
+                  participant.isLocal
+                    ? viewerIsCoHost
+                    : isCoHostIdentity(participant.identity)
+                }
                 handPosition={handQueue.get(participant.identity) ?? null}
                 volume={volumes[participant.identity] ?? 1}
                 onVolumeChange={handleVolumeChange}
