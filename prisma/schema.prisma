@@ -140,6 +140,55 @@ model LinkPreview {
   @@index([updatedAt])
 }
 
+/// A guest the host has removed from a meeting.
+///
+/// Guests have no `User` row, so the `WaitingRoomEntry` DENIED row that bans a
+/// signed-in participant has nothing to point at. Without this, removing a guest
+/// would only disconnect them and they could walk straight back in with the
+/// passcode — which would make host moderation meaningless against exactly the
+/// people it matters most for.
+model MeetingGuestBan {
+  id        String   @id @default(cuid())
+  meetingId String
+  /// The guest id from their session token, not a user id.
+  guestId   String
+  createdAt DateTime @default(now())
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@unique([meetingId, guestId])
+  @@index([meetingId])
+}
+
+/// A guest waiting for the host to admit them.
+///
+/// Separate from `WaitingRoomEntry` rather than making that table's `userId`
+/// nullable: every existing query on it joins through the user relation, and
+/// loosening that would put a null check into the middle of the signed-in
+/// admission path for the benefit of a case it never handles.
+model GuestWaitingEntry {
+  id        String @id @default(cuid())
+  meetingId String
+  /// From the guest's signed session token. Not a user id.
+  guestId String
+  /// Shown to the host in the admit queue, since there is no profile to read.
+  displayName String
+
+  status      KnockStatus @default(PENDING)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  /// Which host or co-host answered. Null while pending.
+  decidedById String?
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  /// One knock per guest per meeting: reloading the lobby must not fill the
+  /// host's queue with duplicates of the same person.
+  @@unique([meetingId, guestId])
+  /// Serves the host's pending-queue poll.
+  @@index([meetingId, status])
+}
+
 enum KnockStatus {
   PENDING
   ADMITTED
@@ -230,6 +279,8 @@ model Meeting {
   participants    Participant[]
   callInvites     CallInvite[]
   knocks          WaitingRoomEntry[]
+  guestKnocks     GuestWaitingEntry[]
+  guestBans       MeetingGuestBan[]
   creationRequest MeetingCreationRequest?
 
   @@index([hostId])

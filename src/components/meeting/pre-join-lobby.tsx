@@ -56,6 +56,7 @@ import {
   NO_BACKGROUND,
   type BackgroundEffect,
 } from "@/lib/meetings/backgrounds";
+import { requestGuestKnock } from "@/lib/meetings/guest-knock-client";
 import { ROOM_PASSCODE_DIGITS } from "@/lib/meetings/types";
 import {
   Select,
@@ -83,6 +84,19 @@ interface PreJoinLobbyProps {
    * when they can join immediately. Null for the host, and for instant meetings.
    */
   opensAt?: string | null;
+  /**
+   * Name chosen at the guest passcode gate.
+   *
+   * Guests have no Clerk profile, so there is nothing to fall back to — without
+   * this they would appear as "Guest" to everyone in the room.
+   */
+  guestName?: string | null;
+  /**
+   * True when this guest must be admitted by the host before joining.
+   * Separate from `waitingRoomRequired` because the two knock through different
+   * endpoints — a guest has no Clerk session for a Server Action to resolve.
+   */
+  guestWaitingRequired?: boolean;
   meetingCode: string;
   meetingTitle: string;
 }
@@ -174,7 +188,9 @@ function deviceName(
 export function PreJoinLobby({
   passcodeRequired = false,
   waitingRoomRequired = false,
+  guestWaitingRequired = false,
   opensAt = null,
+  guestName = null,
   meetingCode,
   meetingTitle,
 }: PreJoinLobbyProps) {
@@ -240,6 +256,7 @@ export function PreJoinLobby({
   const [knockState, setKnockState] = useState<
     "idle" | "waiting" | "denied"
   >("idle");
+  const isGuest = guestName !== null;
   /** Held so the poll can enter the room with the name that was submitted. */
   const knockNameRef = useRef<string>("");
   /** Mirrors `streamRef` so child components and effects can react to changes. */
@@ -366,7 +383,20 @@ export function PreJoinLobby({
   );
 
   useEffect(() => {
-    if (nameInitializedRef.current || !user) {
+    if (nameInitializedRef.current) {
+      return;
+    }
+
+    // A guest has no Clerk profile, so their name comes from the passcode gate.
+    // Checked first because `user` is permanently null for them and the original
+    // guard would return early forever, leaving the field blank.
+    if (guestName !== null && guestName.length > 0) {
+      setParticipantName(guestName);
+      nameInitializedRef.current = true;
+      return;
+    }
+
+    if (!user) {
       return;
     }
 
@@ -377,7 +407,7 @@ export function PreJoinLobby({
         "",
     );
     nameInitializedRef.current = true;
-  }, [user]);
+  }, [user, guestName]);
 
   useEffect(() => {
     const previewElement = videoRef.current;
@@ -661,6 +691,13 @@ export function PreJoinLobby({
 
     setIsJoining(true);
 
+    // Guests knock through their own endpoint: the server action behind
+    // `beginKnocking` resolves the caller from a Clerk session they do not have.
+    if (guestWaitingRequired) {
+      void beginGuestKnocking(trimmedName);
+      return;
+    }
+
     // Waiting room without a passcode: knock, then wait for the host.
     if (waitingRoomRequired) {
       void beginKnocking(trimmedName);
@@ -668,6 +705,31 @@ export function PreJoinLobby({
     }
 
     persistPreferencesAndEnter(trimmedName);
+  };
+
+  /**
+   * Guest equivalent of `beginKnocking`.
+   *
+   * Goes through the API rather than a Server Action because the guest's identity
+   * lives in a signed cookie, not a Clerk session, and every action in this app
+   * resolves the caller from Clerk.
+   */
+  const beginGuestKnocking = async (trimmedName: string) => {
+    setKnockState("waiting");
+    knockNameRef.current = trimmedName;
+
+    const state = await requestGuestKnock(meetingCode);
+
+    if (state === "admitted") {
+      setKnockState("idle");
+      persistPreferencesAndEnter(trimmedName);
+      return;
+    }
+
+    if (state === "denied") {
+      setIsJoining(false);
+      setKnockState("denied");
+    }
   };
 
   /**
@@ -738,19 +800,34 @@ export function PreJoinLobby({
 
     let cancelled = false;
 
+    /** Guests and account holders poll different endpoints for the same answer. */
+    const check = async (): Promise<"admitted" | "waiting" | "denied"> => {
+      if (isGuest) {
+        return requestGuestKnock(meetingCode);
+      }
+
+      const outcome = await knockForEntry(meetingCode);
+
+      return outcome.state === "admitted"
+        ? "admitted"
+        : outcome.state === "denied"
+          ? "denied"
+          : "waiting";
+    };
+
     const timer = window.setInterval(() => {
-      void knockForEntry(meetingCode).then((outcome) => {
+      void check().then((state) => {
         if (cancelled) {
           return;
         }
 
-        if (outcome.state === "admitted") {
+        if (state === "admitted") {
           setKnockState("idle");
           persistPreferencesAndEnter(knockNameRef.current);
           return;
         }
 
-        if (outcome.state === "denied") {
+        if (state === "denied") {
           setIsJoining(false);
           setKnockState("denied");
         }
@@ -764,7 +841,7 @@ export function PreJoinLobby({
     // `persistPreferencesAndEnter` is recreated each render and would restart the
     // interval on every tick, so it is deliberately not a dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [knockState, meetingCode]);
+  }, [knockState, meetingCode, isGuest]);
 
   const blurUnsupported = blurSupported === false;
   const blurNotice = blurUnsupported
@@ -1205,7 +1282,8 @@ export function PreJoinLobby({
                     // Held until the scheduled start. The countdown above unlocks
                     // this by itself, so no reload is needed.
                     waitingForStart ||
-                    knockState === "waiting"
+                    knockState === "waiting" ||
+                    knockState === "denied"
                   }
                 >
                   {isJoining || knockState === "waiting" ? (

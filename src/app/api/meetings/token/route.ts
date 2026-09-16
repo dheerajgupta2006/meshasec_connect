@@ -1,10 +1,21 @@
 import { AccessToken } from "livekit-server-sdk";
+import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import {
   authorizeMeetingJoin,
   recordAttendance,
 } from "@/lib/meetings/authorization";
+import {
+  guestApprovalState,
+  isGuestBanned,
+} from "@/lib/meetings/guest-admission";
+import {
+  GUEST_COOKIE_NAME,
+  guestIdentity,
+  readGuestSessionFor,
+} from "@/lib/meetings/guest-session";
+import { prisma } from "@/lib/prisma";
 import { consumeRateLimit, describeRetryAfter } from "@/lib/rate-limit";
 import { ensureCurrentUser } from "@/lib/users/current-user";
 
@@ -52,16 +63,41 @@ function errorResponse(message: string, status: number): NextResponse {
   return NextResponse.json({ error: message }, { status });
 }
 
-export async function POST(request: Request): Promise<NextResponse> {
-  // Resolves the local row as well as the session: admission is decided against
-  // `User.id`, which is what Meeting.hostId and Participant.userId reference.
-  const me = await ensureCurrentUser();
+/**
+ * Mints a token for a guest holding a verified session.
+ *
+ * The session cookie is the credential: it was issued by `/api/meetings/guest`
+ * only after the passcode was checked, and it names exactly one meeting. Nothing
+ * from the request body is trusted here — not the room, not the display name.
+ *
+ * The ban is re-checked at mint time rather than only at exchange time, because a
+ * guest removed mid-call still holds a valid-looking cookie and would otherwise
+ * reconnect straight away.
+ */
+async function issueGuestAccessToken(
+  meetingCode: string,
+  apiKey: string,
+  apiSecret: string,
+  request: Request,
+): Promise<NextResponse> {
+  const store = await cookies();
+  const session = readGuestSessionFor(
+    store.get(GUEST_COOKIE_NAME)?.value,
+    meetingCode,
+  );
 
-  if (me === null) {
-    return errorResponse("Unauthorized", 401);
+  if (session === null) {
+    return NextResponse.json(
+      {
+        error: "Enter the room passcode to join as a guest.",
+        code: "guest_session_required",
+      },
+      { status: 401 },
+    );
   }
 
-  const limit = consumeRateLimit("meetingToken", me.id);
+  // Keyed on the guest id, so one guest cannot exhaust another's budget.
+  const limit = consumeRateLimit("meetingToken", `guest:${session.guestId}`);
 
   if (!limit.allowed) {
     return NextResponse.json(
@@ -77,6 +113,82 @@ export async function POST(request: Request): Promise<NextResponse> {
     );
   }
 
+  if (await isGuestBanned(meetingCode, session.guestId)) {
+    return NextResponse.json(
+      {
+        error: "The host removed you from this meeting.",
+        code: "removed",
+      },
+      { status: 403 },
+    );
+  }
+
+  // Re-checked because a lock applied after the passcode exchange must still keep
+  // new arrivals out.
+  const meeting = await prisma.meeting.findUnique({
+    where: { meetingCode },
+    select: { isLocked: true },
+  });
+
+  if (meeting === null) {
+    return errorResponse("Meeting not found", 404);
+  }
+
+  if (meeting.isLocked) {
+    return NextResponse.json(
+      { error: "The host has locked this meeting.", code: "locked" },
+      { status: 403 },
+    );
+  }
+
+  // Re-checked at mint time, not only at the passcode exchange, so turning the
+  // waiting room on or revoking approval takes effect on the next reconnect.
+  const approval = await guestApprovalState(meetingCode, session.guestId);
+
+  if (approval === "denied") {
+    return NextResponse.json(
+      { error: "The host did not admit you.", code: "removed" },
+      { status: 403 },
+    );
+  }
+
+  if (approval === "waiting") {
+    return NextResponse.json(
+      {
+        error: "Waiting for the host to admit you.",
+        code: "waiting_for_host",
+      },
+      { status: 403 },
+    );
+  }
+
+  const identity = guestIdentity(session.guestId);
+  // Suffixed so nobody can pass themselves off as an account holder by choosing a
+  // display name. Other participants can always tell a guest apart.
+  const displayName = `${session.displayName} (guest)`;
+
+  const accessToken = new AccessToken(apiKey, apiSecret, {
+    identity,
+    name: displayName,
+    ttl: TOKEN_TTL,
+  });
+
+  accessToken.addGrant({
+    room: meetingCode,
+    roomJoin: true,
+    canPublish: true,
+    canSubscribe: true,
+  });
+
+  void request;
+
+  return NextResponse.json(
+    { token: await accessToken.toJwt(), identity, name: displayName },
+    { headers: { "Cache-Control": "no-store" } },
+  );
+}
+
+export async function POST(request: Request): Promise<NextResponse> {
   let body: unknown;
 
   try {
@@ -107,6 +219,42 @@ export async function POST(request: Request): Promise<NextResponse> {
   if (!apiKey || !apiSecret) {
     console.error("LiveKit API credentials are not configured");
     return errorResponse("Token service is not configured", 500);
+  }
+
+  // Resolves the local row as well as the session: admission is decided against
+  // `User.id`, which is what Meeting.hostId and Participant.userId reference.
+  const me = await ensureCurrentUser();
+
+  // No account. The guest path is a separate, narrower check — every tier of
+  // `authorizeMeetingJoin` is keyed to a user id a guest does not have.
+  if (me === null) {
+    try {
+      return await issueGuestAccessToken(
+        meetingCode,
+        apiKey,
+        apiSecret,
+        request,
+      );
+    } catch (error) {
+      console.error("Failed to generate a guest access token", error);
+      return errorResponse("Unable to generate access token", 500);
+    }
+  }
+
+  const limit = consumeRateLimit("meetingToken", me.id);
+
+  if (!limit.allowed) {
+    return NextResponse.json(
+      {
+        error: `Too many join attempts. Try again in ${describeRetryAfter(
+          limit.retryAfterSeconds,
+        )}.`,
+      },
+      {
+        status: 429,
+        headers: { "Retry-After": String(limit.retryAfterSeconds) },
+      },
+    );
   }
 
   try {

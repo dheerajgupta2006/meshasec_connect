@@ -8,6 +8,7 @@ import {
   MicOff,
   PhoneOff,
   ShieldCheck,
+  UserRound,
   UserRoundCheck,
   UserRoundX,
   X,
@@ -18,6 +19,7 @@ import { toast } from "sonner";
 
 import { endMeeting } from "@/app/meeting/[code]/actions";
 import {
+  decideGuestWaitingRoom,
   decideWaitingRoom,
   getModerationState,
   muteAllParticipants,
@@ -49,6 +51,7 @@ const EMPTY: MeetingModerationState = {
   waitingRoomEnabled: false,
   moderationAvailable: false,
   waiting: [],
+  waitingGuests: [],
 };
 
 /**
@@ -271,6 +274,75 @@ export function HostControls({ meetingCode }: HostControlsProps) {
         <p className="mt-2 rounded-lg bg-amber-400/10 px-2.5 py-1.5 text-[11px] text-amber-200">
           Locked. People already here are unaffected.
         </p>
+      )}
+
+      {state.waitingGuests.length > 0 && (
+        <div className="mt-3">
+          <p
+            className="mb-1.5 text-xs font-medium text-amber-200"
+            role="status"
+            aria-live="polite"
+          >
+            {state.waitingGuests.length} guest
+            {state.waitingGuests.length === 1 ? "" : "s"} waiting to join
+          </p>
+
+          <ul className="space-y-1.5">
+            {state.waitingGuests.map((guest) => (
+              <li
+                key={guest.guestId}
+                className="flex items-center gap-2 rounded-lg border border-amber-400/25 bg-amber-400/[0.07] px-2.5 py-1.5"
+              >
+                <UserRound
+                  className="h-4 w-4 shrink-0 text-amber-300"
+                  aria-hidden="true"
+                />
+                <span className="min-w-0 flex-1 truncate text-xs text-zinc-100">
+                  {guest.displayName}
+                  <span className="ml-1 text-[10px] uppercase tracking-wide text-amber-300/80">
+                    guest
+                  </span>
+                </span>
+
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="secondary"
+                  disabled={busy !== null}
+                  onClick={() =>
+                    void run(`admit-guest-${guest.guestId}`, () =>
+                      decideGuestWaitingRoom(
+                        meetingCode,
+                        guest.guestId,
+                        "admit",
+                      ),
+                    )
+                  }
+                  className="h-7 w-7 bg-emerald-500 text-zinc-950 hover:bg-emerald-400"
+                  aria-label={`Admit ${guest.displayName}`}
+                >
+                  <Check className="h-3.5 w-3.5" />
+                </Button>
+
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  disabled={busy !== null}
+                  onClick={() =>
+                    void run(`deny-guest-${guest.guestId}`, () =>
+                      decideGuestWaitingRoom(meetingCode, guest.guestId, "deny"),
+                    )
+                  }
+                  className="h-7 w-7 text-zinc-400 hover:bg-white/10 hover:text-red-300"
+                  aria-label={`Deny ${guest.displayName}`}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       {state.waiting.length > 0 && (

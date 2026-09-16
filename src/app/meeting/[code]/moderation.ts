@@ -18,6 +18,7 @@ import {
   muteParticipant,
   removeOccupant,
 } from "@/lib/meetings/livekit-admin";
+import { guestIdFromIdentity } from "@/lib/meetings/guest-session";
 import { actingHostId } from "@/lib/meetings/host-succession";
 import { prisma } from "@/lib/prisma";
 import { ensureCurrentUser } from "@/lib/users/current-user";
@@ -210,6 +211,35 @@ export async function removeFromMeeting(
     };
   }
 
+  // A guest has no `User` row, so the DENIED knock that bans a signed-in
+  // participant has nothing to point at. Without a ban of its own, removing a
+  // guest would only disconnect them and they could re-enter with the passcode —
+  // meaningless against exactly the people moderation matters most for.
+  const guestId = guestIdFromIdentity(identity);
+
+  if (guestId !== null) {
+    await prisma.meetingGuestBan
+      .upsert({
+        where: {
+          meetingId_guestId: { meetingId: host.meetingId, guestId },
+        },
+        create: { meetingId: host.meetingId, guestId },
+        update: {},
+        select: { id: true },
+      })
+      .catch(() => undefined);
+
+    const guestOutcome = await removeOccupant(host.meetingCode, identity);
+
+    return guestOutcome.ok
+      ? { ok: true, message: "Guest removed from the meeting." }
+      : {
+          ok: false,
+          message:
+            "They are blocked from rejoining, but we could not disconnect them right now.",
+        };
+  }
+
   // LiveKit identity is the Clerk subject, so the local user is resolved from it.
   const target = await prisma.user.findUnique({
     where: { clerkId: identity },
@@ -316,6 +346,8 @@ export interface MeetingModerationState {
   waitingRoomEnabled: boolean;
   moderationAvailable: boolean;
   waiting: { userId: string; username: string; name: string | null }[];
+  /** Guests waiting to be let in. They have no account, so no username. */
+  waitingGuests: { guestId: string; displayName: string }[];
 }
 
 /**
@@ -332,6 +364,7 @@ export async function getModerationState(
     waitingRoomEnabled: false,
     moderationAvailable: false,
     waiting: [],
+    waitingGuests: [],
   };
 
   const host = await requireHost(meetingCode);
@@ -354,6 +387,12 @@ export async function getModerationState(
         orderBy: { createdAt: "asc" },
         take: 25,
       },
+      guestKnocks: {
+        where: { status: KnockStatus.PENDING },
+        select: { guestId: true, displayName: true },
+        orderBy: { createdAt: "asc" },
+        take: 25,
+      },
     },
   });
 
@@ -372,6 +411,50 @@ export async function getModerationState(
       username: entry.user.username ?? entry.userId.slice(0, 8),
       name: entry.user.name,
     })),
+    waitingGuests: meeting.guestKnocks.map((entry) => ({
+      guestId: entry.guestId,
+      displayName: entry.displayName,
+    })),
+  };
+}
+
+/**
+ * Admits or denies a waiting guest.
+ *
+ * Scoped to a PENDING row so a replayed request cannot flip a decision already
+ * made. Denying does not ban: it refuses this attempt, whereas removing someone
+ * mid-call writes a `MeetingGuestBan`.
+ */
+export async function decideGuestWaitingRoom(
+  meetingCode: string,
+  guestId: string,
+  decision: "admit" | "deny",
+): Promise<ModerationResult> {
+  const host = await requireHost(meetingCode);
+
+  if (host === null) {
+    return { ok: false, message: NOT_HOST };
+  }
+
+  const updated = await prisma.guestWaitingEntry.updateMany({
+    where: {
+      meetingId: host.meetingId,
+      guestId,
+      status: KnockStatus.PENDING,
+    },
+    data: {
+      status: decision === "admit" ? KnockStatus.ADMITTED : KnockStatus.DENIED,
+      decidedById: host.localUserId,
+    },
+  });
+
+  if (updated.count === 0) {
+    return { ok: false, message: "That request is no longer waiting." };
+  }
+
+  return {
+    ok: true,
+    message: decision === "admit" ? "Guest admitted." : "Guest denied.",
   };
 }
 

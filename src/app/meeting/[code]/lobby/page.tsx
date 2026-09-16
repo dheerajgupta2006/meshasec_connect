@@ -1,10 +1,17 @@
 import { auth } from "@clerk/nextjs/server";
 import { ShieldAlert } from "lucide-react";
 import { unstable_noStore as noStore } from "next/cache";
+import { cookies } from "next/headers";
 import Link from "next/link";
-import { notFound, redirect } from "next/navigation";
+import { notFound } from "next/navigation";
 
+import { GuestGate } from "@/components/meeting/guest-gate";
+import { guestApprovalState } from "@/lib/meetings/guest-admission";
 import { PreJoinLobby } from "@/components/meeting/pre-join-lobby";
+import {
+  GUEST_COOKIE_NAME,
+  readGuestSessionFor,
+} from "@/lib/meetings/guest-session";
 import { Button } from "@/components/ui/button";
 import { authorizeMeetingJoin } from "@/lib/meetings/authorization";
 import { prisma } from "@/lib/prisma";
@@ -21,10 +28,6 @@ export default async function LobbyPage({ params }: LobbyPageProps) {
 
   const { userId } = await auth();
 
-  if (!userId) {
-    redirect("/sign-in");
-  }
-
   const meeting = await prisma.meeting.findUnique({
     where: {
       meetingCode: params.code,
@@ -39,6 +42,45 @@ export default async function LobbyPage({ params }: LobbyPageProps) {
 
   if (!meeting) {
     notFound();
+  }
+
+  // No account: this is an invited guest. They get the passcode exchange, and only
+  // once that has issued a session cookie do they see the device lobby. Signing in
+  // is offered but not required — that is the whole point of a guest invite.
+  if (!userId) {
+    const store = await cookies();
+    const guest = readGuestSessionFor(
+      store.get(GUEST_COOKIE_NAME)?.value,
+      meeting.meetingCode,
+    );
+
+    if (guest === null) {
+      return (
+        <GuestGate
+          meetingCode={meeting.meetingCode}
+          meetingTitle={meeting.title}
+        />
+      );
+    }
+
+    // Verified guest. No passcode prompt and no waiting room — both are keyed to a
+    // user id — and the token route re-checks the session and the ban list.
+    return (
+      <PreJoinLobby
+        meetingCode={meeting.meetingCode}
+        meetingTitle={meeting.title}
+        guestName={guest.displayName}
+        // Passing the guest through the host's admit queue when the waiting room
+        // is on. Resolved here so the lobby knows before the user presses Join.
+        guestWaitingRequired={
+          (await guestApprovalState(meeting.meetingCode, guest.guestId)) ===
+          "waiting"
+        }
+        opensAt={
+          meeting.startsAt !== null ? meeting.startsAt.toISOString() : null
+        }
+      />
+    );
   }
 
   // Asked without a passcode, purely to learn whether one is needed. That path
