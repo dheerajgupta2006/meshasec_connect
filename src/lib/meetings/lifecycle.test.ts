@@ -2,10 +2,13 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
 import {
+  EMPTY_ROOM_GRACE_MS,
   STALE_AFTER_MS,
+  groupMeetingsByActivity,
   hasEnded,
   openedAt,
   partitionMeetings,
+  resolveMeetingActivity,
   resolveMeetingStatus,
   type MeetingLifecycleFields,
 } from "@/lib/meetings/lifecycle";
@@ -224,5 +227,235 @@ describe("partitionMeetings", () => {
 
   it("handles an empty list", () => {
     expect(partitionMeetings([], NOW)).toEqual({ upcoming: [], past: [] });
+  });
+});
+
+describe("resolveMeetingActivity", () => {
+  const ONE_MINUTE = MINUTE;
+
+  it("reports ongoing whenever someone is connected, whatever the row says", () => {
+    // A live call must never be filed as past, even if the stored end time has
+    // passed or the staleness window has lapsed.
+    const stale = instant(-STALE_AFTER_MS - HOUR);
+    const closed = instant(-2 * HOUR, at(-HOUR));
+
+    for (const meeting of [stale, closed]) {
+      expect(
+        resolveMeetingActivity({ meeting, liveParticipants: 1, now: NOW }),
+      ).toBe("ongoing");
+    }
+  });
+
+  it("keeps a just-created empty instant meeting joinable", () => {
+    // The host has made the room and copied the link but not opened it yet.
+    // Filing that under past would be absurd.
+    expect(
+      resolveMeetingActivity({
+        meeting: instant(-ONE_MINUTE),
+        liveParticipants: 0,
+        now: NOW,
+      }),
+    ).toBe("upcoming");
+  });
+
+  it("retires an empty room once the grace window lapses", () => {
+    // This is what moves a meeting everyone has left into past.
+    expect(
+      resolveMeetingActivity({
+        meeting: instant(-EMPTY_ROOM_GRACE_MS - ONE_MINUTE),
+        liveParticipants: 0,
+        now: NOW,
+      }),
+    ).toBe("past");
+  });
+
+  it("treats the grace boundary exactly", () => {
+    expect(
+      resolveMeetingActivity({
+        meeting: instant(-EMPTY_ROOM_GRACE_MS + ONE_MINUTE),
+        liveParticipants: 0,
+        now: NOW,
+      }),
+    ).toBe("upcoming");
+
+    expect(
+      resolveMeetingActivity({
+        meeting: instant(-EMPTY_ROOM_GRACE_MS),
+        liveParticipants: 0,
+        now: NOW,
+      }),
+    ).toBe("past");
+  });
+
+  it("reports past for an explicitly ended meeting with nobody in it", () => {
+    expect(
+      resolveMeetingActivity({
+        meeting: instant(-30 * MINUTE, at(-ONE_MINUTE)),
+        liveParticipants: 0,
+        now: NOW,
+      }),
+    ).toBe("past");
+  });
+
+  it("reports upcoming for a scheduled meeting that has not started", () => {
+    expect(
+      resolveMeetingActivity({
+        meeting: scheduled(2 * HOUR),
+        liveParticipants: 0,
+        now: NOW,
+      }),
+    ).toBe("upcoming");
+  });
+
+  it("does not assume a room is empty when LiveKit is unreachable", () => {
+    // Null means "cannot tell". Treating it as zero would sweep every live
+    // meeting into past the moment the media server hiccupped.
+    expect(
+      resolveMeetingActivity({
+        meeting: instant(-2 * HOUR),
+        liveParticipants: null,
+        now: NOW,
+      }),
+    ).toBe("ongoing");
+  });
+
+  it("still trusts the database when LiveKit is unreachable", () => {
+    // An explicit end and the staleness rule both still apply.
+    expect(
+      resolveMeetingActivity({
+        meeting: instant(-2 * HOUR, at(-HOUR)),
+        liveParticipants: null,
+        now: NOW,
+      }),
+    ).toBe("past");
+
+    expect(
+      resolveMeetingActivity({
+        meeting: instant(-STALE_AFTER_MS - HOUR),
+        liveParticipants: null,
+        now: NOW,
+      }),
+    ).toBe("past");
+  });
+
+  it("always returns one of the three groups", () => {
+    fc.assert(
+      fc.property(
+        fc.record({
+          createdAt: fc.date({ noInvalidDate: true }),
+          startsAt: fc.option(fc.date({ noInvalidDate: true }), { nil: null }),
+          endsAt: fc.option(fc.date({ noInvalidDate: true }), { nil: null }),
+        }),
+        fc.option(fc.integer({ min: 0, max: 50 }), { nil: null }),
+        fc.integer(),
+        (meeting, liveParticipants, now) => {
+          expect(["upcoming", "ongoing", "past"]).toContain(
+            resolveMeetingActivity({ meeting, liveParticipants, now }),
+          );
+        },
+      ),
+      { numRuns: 500 },
+    );
+  });
+
+  it("never reports past while participants are connected", () => {
+    fc.assert(
+      fc.property(
+        fc.record({
+          createdAt: fc.date({ noInvalidDate: true }),
+          startsAt: fc.option(fc.date({ noInvalidDate: true }), { nil: null }),
+          endsAt: fc.option(fc.date({ noInvalidDate: true }), { nil: null }),
+        }),
+        fc.integer({ min: 1, max: 50 }),
+        fc.integer(),
+        (meeting, liveParticipants, now) => {
+          expect(
+            resolveMeetingActivity({ meeting, liveParticipants, now }),
+          ).toBe("ongoing");
+        },
+      ),
+      { numRuns: 500 },
+    );
+  });
+});
+
+describe("groupMeetingsByActivity", () => {
+  /** Attaches a meeting code, which is what the live-count map is keyed by. */
+  function coded(
+    code: string,
+    meeting: MeetingLifecycleFields,
+  ): MeetingLifecycleFields & { meetingCode: string } {
+    return { meetingCode: code, ...meeting };
+  }
+
+  it("routes each meeting into exactly one group", () => {
+    const live = coded("LIVE", instant(-30 * MINUTE));
+    const soon = coded("SOON", { ...scheduled(HOUR) });
+    const done = coded("DONE", instant(-5 * HOUR, at(-4 * HOUR)));
+
+    const counts = new Map([["LIVE", 2]]);
+    const groups = groupMeetingsByActivity([live, soon, done], counts, NOW);
+
+    expect(groups.ongoing).toEqual([live]);
+    expect(groups.upcoming).toEqual([soon]);
+    expect(groups.past).toEqual([done]);
+  });
+
+  it("treats a code missing from the map as empty", () => {
+    const abandoned = coded(
+      "GONE",
+      instant(-EMPTY_ROOM_GRACE_MS - HOUR),
+    );
+
+    const groups = groupMeetingsByActivity([abandoned], new Map(), NOW);
+
+    expect(groups.past).toEqual([abandoned]);
+    expect(groups.ongoing).toEqual([]);
+  });
+
+  it("loses nothing", () => {
+    const meetings = [
+      coded("A", instant(-MINUTE)),
+      coded("B", instant(-EMPTY_ROOM_GRACE_MS - MINUTE)),
+      coded("C", instant(-HOUR, at(-MINUTE))),
+      coded("D", { ...scheduled(3 * HOUR) }),
+    ];
+
+    const groups = groupMeetingsByActivity(meetings, new Map([["A", 1]]), NOW);
+
+    expect(
+      groups.ongoing.length + groups.upcoming.length + groups.past.length,
+    ).toBe(meetings.length);
+  });
+
+  it("sorts ongoing newest first and upcoming soonest first", () => {
+    const older = coded("OLD", instant(-40 * MINUTE));
+    const newer = coded("NEW", instant(-5 * MINUTE));
+    const later = coded("LATER", { ...scheduled(5 * HOUR) });
+    const sooner = coded("SOONER", { ...scheduled(HOUR) });
+
+    const groups = groupMeetingsByActivity(
+      [older, later, newer, sooner],
+      new Map([
+        ["OLD", 1],
+        ["NEW", 1],
+      ]),
+      NOW,
+    );
+
+    expect(groups.ongoing).toEqual([newer, older]);
+    expect(groups.upcoming).toEqual([sooner, later]);
+  });
+
+  it("does not mutate its input", () => {
+    const meetings = [
+      coded("A", instant(-MINUTE)),
+      coded("B", instant(-2 * MINUTE)),
+    ];
+    const snapshot = [...meetings];
+
+    groupMeetingsByActivity(meetings, new Map(), NOW);
+
+    expect(meetings).toEqual(snapshot);
   });
 });

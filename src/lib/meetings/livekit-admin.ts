@@ -75,6 +75,39 @@ export function moderationConfigured(): boolean {
   return client() !== null;
 }
 
+/**
+ * Live participant counts, keyed by room name (which is the meeting code).
+ *
+ * One request for the whole dashboard rather than one per meeting: `listRooms`
+ * returns every active room, and LiveKit only keeps a room alive while someone is
+ * connected to it. A room absent from this map has nobody in it.
+ *
+ * Returns null — not an empty map — when LiveKit is unreachable or unconfigured.
+ * The distinction matters: "nobody is in any meeting" and "we cannot tell" must
+ * lead to different classifications, and conflating them would sweep live
+ * meetings into the past list.
+ */
+export async function listActiveRooms(): Promise<Map<string, number> | null> {
+  const service = client();
+
+  if (service === null) {
+    return null;
+  }
+
+  try {
+    const rooms = await service.listRooms();
+    const counts = new Map<string, number>();
+
+    rooms.forEach((room) => {
+      counts.set(room.name, room.numParticipants);
+    });
+
+    return counts;
+  } catch {
+    return null;
+  }
+}
+
 export interface RoomOccupant {
   /** LiveKit identity, which this app sets to the Clerk subject. */
   identity: string;

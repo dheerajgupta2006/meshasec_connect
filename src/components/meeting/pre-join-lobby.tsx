@@ -12,6 +12,7 @@ import {
   AudioLines,
   Camera,
   CameraOff,
+  Clock,
   KeyRound,
   LoaderCircle,
   Mic,
@@ -28,6 +29,7 @@ import {
   FormEvent,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -76,6 +78,11 @@ interface PreJoinLobbyProps {
    * Joining then means knocking and waiting for approval.
    */
   waitingRoomRequired?: boolean;
+  /**
+   * ISO start time for a scheduled meeting the visitor may not enter yet, or null
+   * when they can join immediately. Null for the host, and for instant meetings.
+   */
+  opensAt?: string | null;
   meetingCode: string;
   meetingTitle: string;
 }
@@ -95,6 +102,29 @@ type MediaStatus = "requesting" | "ready" | "error";
  * and only guests in a waiting room ever run it.
  */
 const KNOCK_POLL_INTERVAL_MS = 4000;
+
+/** Renders a remaining duration as a coarse, readable countdown. */
+function formatCountdown(remainingMs: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (days > 0) {
+    return `${days}d ${hours}h`;
+  }
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+
+  return `${seconds}s`;
+}
 
 type BlurStatus = "idle" | "starting" | "active" | "failed";
 
@@ -144,6 +174,7 @@ function deviceName(
 export function PreJoinLobby({
   passcodeRequired = false,
   waitingRoomRequired = false,
+  opensAt = null,
   meetingCode,
   meetingTitle,
 }: PreJoinLobbyProps) {
@@ -177,6 +208,35 @@ export function PreJoinLobby({
   const [passcode, setPasscode] = useState("");
   const [passcodeError, setPasscodeError] = useState<string | null>(null);
   const { allowRejoin } = useCall();
+
+  /**
+   * Ticks once a second so the countdown is live and the Join button unlocks by
+   * itself at the start time, without the visitor having to reload.
+   */
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+
+  const opensAtMs = useMemo(() => {
+    if (opensAt === null) {
+      return null;
+    }
+
+    const parsed = new Date(opensAt).getTime();
+
+    return Number.isNaN(parsed) ? null : parsed;
+  }, [opensAt]);
+
+  const waitingForStart = opensAtMs !== null && nowMs < opensAtMs;
+
+  useEffect(() => {
+    if (opensAtMs === null || nowMs >= opensAtMs) {
+      return;
+    }
+
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+
+    return () => window.clearInterval(timer);
+  }, [opensAtMs, nowMs]);
+
   const [knockState, setKnockState] = useState<
     "idle" | "waiting" | "denied"
   >("idle");
@@ -561,6 +621,12 @@ export function PreJoinLobby({
       return;
     }
 
+    // Scheduled meeting, not open yet. The button is disabled too; this guards
+    // against a submit from the keyboard.
+    if (waitingForStart) {
+      return;
+    }
+
     setPasscodeError(null);
 
     // A guest must clear the passcode before the room is entered. Verifying here
@@ -940,6 +1006,23 @@ export function PreJoinLobby({
                   />
                 </div>
 
+                {waitingForStart && opensAtMs !== null && (
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className="rounded-xl border border-amber-400/25 bg-amber-500/10 px-3 py-3 text-sm"
+                  >
+                    <p className="flex items-center gap-2 font-medium text-amber-100">
+                      <Clock className="h-4 w-4 shrink-0" aria-hidden="true" />
+                      This meeting has not started yet
+                    </p>
+                    <p className="mt-1 text-xs text-amber-200/80">
+                      Starts in {formatCountdown(opensAtMs - nowMs)}. You will be
+                      able to join automatically.
+                    </p>
+                  </div>
+                )}
+
                 {knockState === "waiting" && (
                   <div
                     role="status"
@@ -1118,15 +1201,27 @@ export function PreJoinLobby({
                   disabled={
                     mediaStatus !== "ready" ||
                     participantName.trim().length === 0 ||
-                    isJoining
+                    isJoining ||
+                    // Held until the scheduled start. The countdown above unlocks
+                    // this by itself, so no reload is needed.
+                    waitingForStart ||
+                    knockState === "waiting"
                   }
                 >
-                  {isJoining ? (
+                  {isJoining || knockState === "waiting" ? (
                     <LoaderCircle className="h-4 w-4 animate-spin" />
+                  ) : waitingForStart ? (
+                    <Clock className="h-4 w-4" />
                   ) : (
                     <Video className="h-4 w-4" />
                   )}
-                  {isJoining ? "Joining…" : "Join Meeting"}
+                  {knockState === "waiting"
+                    ? "Waiting for the host…"
+                    : waitingForStart
+                      ? "Not started yet"
+                      : isJoining
+                        ? "Joining…"
+                        : "Join Meeting"}
                 </Button>
               </form>
             </CardContent>

@@ -14,9 +14,10 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import {
-  partitionMeetings,
-  resolveMeetingStatus,
+  groupMeetingsByActivity,
+  type MeetingActivity,
 } from "@/lib/meetings/lifecycle";
+import { listActiveRooms } from "@/lib/meetings/livekit-admin";
 import { AddToCalendar } from "@/components/calendar/add-to-calendar";
 import { ConnectDialog } from "@/components/connections/connect-dialog";
 import {
@@ -74,22 +75,23 @@ function firstNameOf(name: string | null): string | null {
 function MeetingCard({
   meeting,
   clerkUserId,
-  isPast,
+  activity,
+  liveParticipants,
 }: {
   meeting: DashboardMeeting;
   clerkUserId: string;
-  isPast: boolean;
+  activity: MeetingActivity;
+  /** Live count for an ongoing meeting; null when unknown. */
+  liveParticipants: number | null;
 }) {
   const scheduledFor = meeting.startsAt ?? meeting.createdAt;
   const isHost = meeting.host.clerkId === clerkUserId;
-  // Derived from the shared lifecycle rule so an instant meeting counts as live
-  // too. The previous test required a non-null `startsAt`, which instant meetings
-  // never have, so they never showed "Ready now".
-  const isInProgress = resolveMeetingStatus(meeting, Date.now()) === "live";
+  const isPast = activity === "past";
+  const isInProgress = activity === "ongoing";
 
-  // "Rejoin" is only truthful for a room that has already been live; a meeting
-  // whose start time is still ahead has never been open.
-  const actionLabel = isPast || isInProgress ? "Rejoin" : "Join";
+  // "Rejoin" only for a room somebody is actually in. An upcoming meeting has
+  // never been open, so offering to rejoin it was simply untrue.
+  const actionLabel = isInProgress ? "Rejoin" : "Join";
   const lobbyHref = `/meeting/${encodeURIComponent(meeting.meetingCode)}/lobby`;
 
   return (
@@ -123,7 +125,13 @@ function MeetingCard({
             ) : (
               <Video className="h-3 w-3" aria-hidden="true" />
             )}
-            {isPast ? "Ended" : isInProgress ? "Ready now" : "Upcoming"}
+            {isPast
+              ? "Ended"
+              : isInProgress
+                ? liveParticipants === null
+                  ? "Live"
+                  : `Live · ${liveParticipants} in call`
+                : "Upcoming"}
           </span>
           <span className="min-w-0 truncate font-mono text-xs text-zinc-500">
             {meeting.meetingCode}
@@ -184,23 +192,28 @@ function MeetingCard({
         </dl>
 
         <div className="mt-auto space-y-2 pt-2">
-          <Button
-            asChild
-            size="sm"
-            className={`h-11 w-full sm:h-9 ${
-              isPast
-                ? "bg-white/10 text-zinc-100 hover:bg-white/20"
-                : "bg-gradient-to-r from-indigo-500 to-violet-500 text-white hover:from-indigo-400 hover:to-violet-400"
-            }`}
-          >
-            <Link
-              href={lobbyHref}
-              aria-label={`${actionLabel} ${meeting.title}`}
+          {/* A finished meeting offers no way in. Following a link into an ended
+              room used to revive it, which is why past meetings kept coming back
+              to life. */}
+          {isPast ? (
+            <p className="rounded-lg bg-white/[0.04] px-3 py-2 text-center text-xs text-zinc-500">
+              This meeting has ended
+            </p>
+          ) : (
+            <Button
+              asChild
+              size="sm"
+              className="h-11 w-full bg-gradient-to-r from-indigo-500 to-violet-500 text-white hover:from-indigo-400 hover:to-violet-400 sm:h-9"
             >
-              {actionLabel}
-              <ArrowUpRight className="h-4 w-4" aria-hidden="true" />
-            </Link>
-          </Button>
+              <Link
+                href={lobbyHref}
+                aria-label={`${actionLabel} ${meeting.title}`}
+              >
+                {actionLabel}
+                <ArrowUpRight className="h-4 w-4" aria-hidden="true" />
+              </Link>
+            </Button>
+          )}
 
           {/* Only offered for meetings still ahead: adding a finished meeting to
               a calendar has no purpose. */}
@@ -220,7 +233,7 @@ function MeetingCard({
   );
 }
 
-function EmptyMeetings({ type }: { type: "upcoming" | "past" }) {
+function EmptyMeetings({ type }: { type: "upcoming" | "past" | "ongoing" }) {
   return (
     <div className="rounded-2xl border border-dashed border-white/15 bg-white/[0.02] px-6 py-12 text-center">
       <span
@@ -327,14 +340,19 @@ export default async function DashboardPage() {
     },
   });
 
-  // Delegated to `lib/meetings/lifecycle.ts` rather than filtered on `endsAt`
-  // here. The old test was `endsAt && endsAt < now`, which no instant meeting can
-  // ever satisfy because instant meetings are created with `endsAt: null` — they
-  // stayed under Upcoming permanently.
-  const { upcoming: upcomingMeetings, past: pastMeetings } = partitionMeetings(
-    meetings,
-    Date.now(),
-  );
+  // Asks LiveKit which rooms actually have people in them. One request for the
+  // whole page: a room only exists on the media server while someone is
+  // connected, so absence from this map means the room is empty.
+  //
+  // Null means LiveKit could not be reached, which is deliberately different from
+  // an empty map — "cannot tell" must not sweep live meetings into the past list.
+  const liveCounts = await listActiveRooms();
+
+  const {
+    ongoing: ongoingMeetings,
+    upcoming: upcomingMeetings,
+    past: pastMeetings,
+  } = groupMeetingsByActivity(meetings, liveCounts, Date.now());
 
   const firstName = firstNameOf(me?.name ?? null);
 
@@ -389,8 +407,12 @@ export default async function DashboardPage() {
 
         <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           <StatTile
-            label="Upcoming"
-            value={upcomingMeetings.length}
+            label={ongoingMeetings.length > 0 ? "Ongoing" : "Upcoming"}
+            value={
+              ongoingMeetings.length > 0
+                ? ongoingMeetings.length
+                : upcomingMeetings.length
+            }
             tone="text-white"
           />
           <StatTile
@@ -410,6 +432,48 @@ export default async function DashboardPage() {
           outgoing={outgoingSummaries}
         />
 
+        {/* Only rendered when something is actually live. An always-visible empty
+            "Ongoing" section would be noise on most visits. */}
+        {ongoingMeetings.length > 0 && (
+          <section className="space-y-4" aria-labelledby="ongoing-heading">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <h2
+                  id="ongoing-heading"
+                  className="flex items-center gap-2 text-lg font-semibold text-white sm:text-2xl"
+                >
+                  <span
+                    aria-hidden="true"
+                    className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-emerald-400"
+                  />
+                  Ongoing
+                </h2>
+                <p className="text-sm text-zinc-400">
+                  Someone is in the call right now. Rejoin to go back in.
+                </p>
+              </div>
+              <span className="shrink-0 rounded-full border border-emerald-400/25 bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-200">
+                {ongoingMeetings.length}
+              </span>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              {ongoingMeetings.map((meeting) => (
+                <MeetingCard
+                  key={meeting.id}
+                  meeting={meeting}
+                  clerkUserId={userId}
+                  activity="ongoing"
+                  liveParticipants={
+                    liveCounts === null
+                      ? null
+                      : (liveCounts.get(meeting.meetingCode) ?? 0)
+                  }
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
         <section className="space-y-4" aria-labelledby="upcoming-heading">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-0">
@@ -420,7 +484,7 @@ export default async function DashboardPage() {
                 Upcoming
               </h2>
               <p className="text-sm text-zinc-400">
-                Meetings that are scheduled or still active.
+                Scheduled meetings and rooms nobody has joined yet.
               </p>
             </div>
             <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.06] px-2.5 py-1 text-xs font-medium text-zinc-300">
@@ -434,7 +498,8 @@ export default async function DashboardPage() {
                   key={meeting.id}
                   meeting={meeting}
                   clerkUserId={userId}
-                  isPast={false}
+                  activity="upcoming"
+                  liveParticipants={null}
                 />
               ))}
             </div>
@@ -467,7 +532,8 @@ export default async function DashboardPage() {
                   key={meeting.id}
                   meeting={meeting}
                   clerkUserId={userId}
-                  isPast
+                  activity="past"
+                  liveParticipants={null}
                 />
               ))}
             </div>

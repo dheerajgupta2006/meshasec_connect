@@ -32,6 +32,8 @@ export default async function LobbyPage({ params }: LobbyPageProps) {
     select: {
       title: true,
       meetingCode: true,
+      startsAt: true,
+      hostId: true,
     },
   });
 
@@ -83,6 +85,14 @@ export default async function LobbyPage({ params }: LobbyPageProps) {
         decision !== null &&
         !decision.allowed &&
         decision.reason === "waiting_for_host"
+      }
+      // The host may open a scheduled room early; everyone else waits here until
+      // the start time, which is what makes this a waiting lobby rather than a
+      // device check they can walk straight through.
+      opensAt={
+        meeting.startsAt !== null && localUserId !== meeting.hostId
+          ? meeting.startsAt.toISOString()
+          : null
       }
     />
   );
