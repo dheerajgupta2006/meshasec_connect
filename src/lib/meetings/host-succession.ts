@@ -45,9 +45,16 @@ interface MeetingForSuccession {
   currentHostId: string | null;
 }
 
-async function buildCandidates(
+interface Roster {
+  candidates: SuccessionCandidate[];
+  /** Read from the live room, never inferred from enrollment rows. */
+  actingHostPresent: boolean;
+}
+
+async function buildRoster(
   meeting: MeetingForSuccession,
-): Promise<SuccessionCandidate[] | null> {
+  actingId: string,
+): Promise<Roster | null> {
   const occupants = await listOccupants(meeting.meetingCode);
 
   // `listOccupants` returns an empty array both for an empty room and for an
@@ -61,15 +68,25 @@ async function buildCandidates(
     occupants.map((occupant) => occupant.identity),
   );
 
-  const participants = await prisma.participant.findMany({
-    where: { meetingId: meeting.id },
-    select: {
-      userId: true,
-      joinedAt: true,
-      isCoHost: true,
-      user: { select: { clerkId: true } },
-    },
-  });
+  const [participants, actingHost] = await Promise.all([
+    prisma.participant.findMany({
+      where: { meetingId: meeting.id },
+      select: {
+        userId: true,
+        joinedAt: true,
+        isCoHost: true,
+        user: { select: { clerkId: true } },
+      },
+    }),
+    // Looked up separately and deliberately. The acting host frequently has no
+    // enrollment row — creating a meeting does not make one, and the admission
+    // check never needs one for the owner — so their presence cannot be read off
+    // the participant list.
+    prisma.user.findUnique({
+      where: { id: actingId },
+      select: { clerkId: true },
+    }),
+  ]);
 
   const candidates: SuccessionCandidate[] = [];
 
@@ -89,7 +106,12 @@ async function buildCandidates(
     });
   });
 
-  return candidates;
+  const actingHostPresent =
+    actingHost?.clerkId !== null &&
+    actingHost?.clerkId !== undefined &&
+    presentIdentities.has(actingHost.clerkId);
+
+  return { candidates, actingHostPresent };
 }
 
 /**
@@ -107,17 +129,19 @@ export async function applyHostSuccession(
 ): Promise<string> {
   const acting = actingHostId(meeting);
 
-  const candidates = await buildCandidates(meeting);
+  const roster = await buildRoster(meeting, acting);
 
-  if (candidates === null) {
+  if (roster === null) {
     return acting;
   }
 
-  if (!needsSuccession(candidates, acting)) {
+  if (
+    !needsSuccession(roster.candidates, acting, roster.actingHostPresent)
+  ) {
     return acting;
   }
 
-  const successor = pickSuccessor(candidates, acting);
+  const successor = pickSuccessor(roster.candidates, acting);
 
   if (successor === null) {
     return acting;

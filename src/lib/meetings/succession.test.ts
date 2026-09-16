@@ -28,7 +28,7 @@ describe("needsSuccession", () => {
       candidate({ userId: "guest" }),
     ];
 
-    expect(needsSuccession(roster, HOST)).toBe(false);
+    expect(needsSuccession(roster, HOST, true)).toBe(false);
   });
 
   it("is true when the host is gone and someone else is present", () => {
@@ -37,7 +37,7 @@ describe("needsSuccession", () => {
       candidate({ userId: "guest" }),
     ];
 
-    expect(needsSuccession(roster, HOST)).toBe(true);
+    expect(needsSuccession(roster, HOST, false)).toBe(true);
   });
 
   it("is false for an empty room", () => {
@@ -47,14 +47,39 @@ describe("needsSuccession", () => {
       candidate({ userId: "guest", isPresent: false }),
     ];
 
-    expect(needsSuccession(roster, HOST)).toBe(false);
-    expect(needsSuccession([], HOST)).toBe(false);
+    expect(needsSuccession(roster, HOST, false)).toBe(false);
+    expect(needsSuccession([], HOST, false)).toBe(false);
   });
 
-  it("is false when the host is absent from the roster but nobody is present", () => {
-    expect(
-      needsSuccession([candidate({ userId: "guest", isPresent: false })], HOST),
-    ).toBe(false);
+  it("keeps the host when they are present but absent from the roster", () => {
+    // The reported bug. A host who created the meeting through /meeting/new has no
+    // enrollment row, so they never appeared in the roster — and inferring presence
+    // from the roster handed the role to the first person who joined.
+    const roster = [candidate({ userId: "friend" })];
+
+    expect(needsSuccession(roster, HOST, true)).toBe(false);
+  });
+
+  it("ignores the roster entirely when the host is present", () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            userId: fc.string({ minLength: 1, maxLength: 6 }),
+            identity: fc.string({ minLength: 1, maxLength: 8 }),
+            joinedAt: fc.integer({ min: 0, max: 10_000 }),
+            isCoHost: fc.boolean(),
+            isPresent: fc.boolean(),
+          }),
+          { maxLength: 10 },
+        ),
+        (roster) => {
+          // No roster shape may cause a handoff while the host is connected.
+          expect(needsSuccession(roster, HOST, true)).toBe(false);
+        },
+      ),
+      { numRuns: 500 },
+    );
   });
 });
 
@@ -198,7 +223,7 @@ describe("pickSuccessor", () => {
 
     fc.assert(
       fc.property(rosterArb, (roster) => {
-        if (needsSuccession(roster, HOST)) {
+        if (needsSuccession(roster, HOST, false)) {
           // If a handoff is called for, one must be available — otherwise the
           // caller would decide to hand over and then find nobody to hand to.
           expect(pickSuccessor(roster, HOST)).not.toBeNull();

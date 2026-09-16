@@ -317,11 +317,14 @@ export async function POST(request: Request): Promise<NextResponse> {
       }
     }
 
-    // An open meeting joined by link enrolls the attendee, which is what makes
-    // it appear in their dashboard history afterwards.
-    if (!decision.enrolled) {
-      await recordAttendance(decision.meeting.id, me.id);
-    }
+    // Everyone who actually joins gets an attendance row, including the host.
+    //
+    // `decision.enrolled` is true for the host because ownership alone admits
+    // them, so the previous `if (!decision.enrolled)` guard skipped them — leaving
+    // the creator of a meeting with no `Participant` row at all. That is what made
+    // host succession think the host was absent and hand the role to the first
+    // person who joined. `recordAttendance` upserts, so this is idempotent.
+    await recordAttendance(decision.meeting.id, me.id);
 
     // The display name comes from the verified profile, never from the request
     // body. Trusting the client here allowed trivial impersonation.

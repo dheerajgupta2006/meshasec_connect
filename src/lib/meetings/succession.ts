@@ -62,19 +62,27 @@ export function pickSuccessor(
 /**
  * Whether the acting host needs replacing.
  *
- * True only when they are genuinely absent *and* somebody else is present. An
- * empty room is left alone: there is nobody to hand it to, and the meeting is
- * about to be retired as finished anyway.
+ * `actingHostPresent` is a required argument rather than something derived from
+ * `candidates`, and that is the whole point. It used to be inferred by looking for
+ * the host in the roster — but the roster is built from enrollment rows, and a host
+ * who created a meeting through `/meeting/new` has none: nothing enrolls them,
+ * because the admission check already lets them in as the owner. Their absence from
+ * the roster was therefore read as absence from the *room*, and the host role was
+ * handed away the instant anybody else joined.
+ *
+ * Presence must come from the live room. Making the caller supply it means a
+ * missing row can no longer be mistaken for a missing person.
+ *
+ * True only when the host is genuinely absent *and* somebody else is present. An
+ * empty room is left alone: there is nobody to hand it to, and the meeting is about
+ * to be retired as finished anyway.
  */
 export function needsSuccession(
   candidates: readonly SuccessionCandidate[],
   actingHostId: string,
+  actingHostPresent: boolean,
 ): boolean {
-  const hostPresent = candidates.some(
-    (candidate) => candidate.userId === actingHostId && candidate.isPresent,
-  );
-
-  if (hostPresent) {
+  if (actingHostPresent) {
     return false;
   }
 
