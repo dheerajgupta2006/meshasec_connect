@@ -81,10 +81,28 @@ interface CallContextValue {
   session: ActiveSession | null;
   status: CallStatus;
   error: CallError | null;
-  /** Idempotent: joining the room you are already in is a no-op. */
+  /**
+   * Idempotent, and ignored for a room the user has explicitly left. See
+   * `leftCode` for why that guard exists.
+   */
   joinCall: (request: JoinRequest) => void;
   /** Explicit hang-up. Records attendance and tears the connection down. */
   leaveCall: () => void;
+  /**
+   * The room the user hung up on, or null. While set, `joinCall` for that room is
+   * refused, so the meeting page shows a "rejoin" prompt instead of reconnecting.
+   */
+  leftCode: string | null;
+  /** Clears the guard and reconnects. The only way back after a hang-up. */
+  rejoinCall: (request: JoinRequest) => void;
+  /**
+   * Clears the guard without connecting.
+   *
+   * Used by the lobby: someone who leaves and then deliberately re-enters through
+   * the lobby has already expressed intent to join, so they should not be met with
+   * a "you left this call" prompt.
+   */
+  allowRejoin: (meetingCode: string) => void;
   retry: () => void;
 }
 
@@ -241,7 +259,36 @@ export function CallProvider({ children }: { children: ReactNode }) {
   /** Guards against a second token fetch for a request already in flight. */
   const fetchingRef = useRef<string | null>(null);
 
+  /**
+   * The room the user hung up on.
+   *
+   * Held in a ref as well as state because `joinCall` must see the current value
+   * synchronously — `rejoinCall` clears the guard and joins in the same tick, and
+   * a state read there would still see the stale value.
+   *
+   * This guard is what fixes the hang-up loop. Clearing `session` swaps the
+   * provider between its two render branches, and because the element type at that
+   * position changes, React unmounts and remounts the whole child tree. That
+   * remount re-ran the meeting page's join effect, which reconnected, which
+   * swapped the branch back — an endless join/leave cycle that made the call
+   * impossible to end.
+   */
+  const leftRef = useRef<string | null>(null);
+  const [leftCode, setLeftCode] = useState<string | null>(null);
+
+  /** Mirrors the connected room code so callbacks can read it without a dep. */
+  const sessionCodeRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    sessionCodeRef.current = session?.meetingCode ?? null;
+  }, [session]);
+
   const joinCall = useCallback((next: JoinRequest) => {
+    // Refuse to auto-reconnect to a room the user deliberately left.
+    if (leftRef.current === next.meetingCode) {
+      return;
+    }
+
     setRequest((current) => {
       // Already in this room: do not disturb the live connection.
       if (current !== null && current.meetingCode === next.meetingCode) {
@@ -259,6 +306,9 @@ export function CallProvider({ children }: { children: ReactNode }) {
       // Explicit hang-up is the only path that records attendance. Not awaited:
       // the user should not wait on a round trip to leave.
       void leaveMeeting(code);
+
+      leftRef.current = code;
+      setLeftCode(code);
     }
 
     fetchingRef.current = null;
@@ -266,6 +316,23 @@ export function CallProvider({ children }: { children: ReactNode }) {
     setRequest(null);
     setError(null);
   }, [session, request]);
+
+  const allowRejoin = useCallback((meetingCode: string) => {
+    if (leftRef.current === meetingCode) {
+      leftRef.current = null;
+      setLeftCode(null);
+    }
+  }, []);
+
+  const rejoinCall = useCallback(
+    (next: JoinRequest) => {
+      // Synchronous so the `joinCall` below sees the cleared guard.
+      leftRef.current = null;
+      setLeftCode(null);
+      joinCall(next);
+    },
+    [joinCall],
+  );
 
   const retry = useCallback(() => {
     fetchingRef.current = null;
@@ -392,13 +459,26 @@ export function CallProvider({ children }: { children: ReactNode }) {
   }, []);
 
   /**
-   * Fires when the media connection drops.
+   * Fires when the media connection drops, for any reason: an explicit hang-up,
+   * the host removing this participant, or the network going away.
    *
-   * Deliberately does not navigate or record anything: a drop can be a network
-   * blip, and `leaveCall` already owns the explicit hang-up. Clearing the session
-   * here just returns the UI to its idle state.
+   * The guard is set here as well as in `leaveCall`, and that is deliberate. Any
+   * path that clears the session remounts the child tree, which re-runs the
+   * meeting page's join effect — so without the guard a dropped connection
+   * reconnects itself forever. Reconnecting is offered as a button instead.
+   *
+   * Records nothing and does not navigate: a drop is not a decision.
    */
   const handleDisconnected = useCallback(() => {
+    // Read from a ref rather than a state updater: a `setState` callback must be
+    // pure, and React may invoke it twice in development.
+    const code = sessionCodeRef.current;
+
+    if (code !== null) {
+      leftRef.current = code;
+      setLeftCode(code);
+    }
+
     setSession(null);
     setRequest(null);
     fetchingRef.current = null;
@@ -416,8 +496,28 @@ export function CallProvider({ children }: { children: ReactNode }) {
   }, [error, session, request]);
 
   const value = useMemo<CallContextValue>(
-    () => ({ session, status, error, joinCall, leaveCall, retry }),
-    [session, status, error, joinCall, leaveCall, retry],
+    () => ({
+      session,
+      status,
+      error,
+      joinCall,
+      leaveCall,
+      leftCode,
+      rejoinCall,
+      allowRejoin,
+      retry,
+    }),
+    [
+      session,
+      status,
+      error,
+      joinCall,
+      leaveCall,
+      leftCode,
+      rejoinCall,
+      allowRejoin,
+      retry,
+    ],
   );
 
   // No live room: render the app untouched. This is the common case for every

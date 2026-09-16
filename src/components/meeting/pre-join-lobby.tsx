@@ -49,6 +49,7 @@ import {
   verifyRoomPasscode,
 } from "@/app/meeting/[code]/actions";
 import { BackgroundPicker } from "@/components/meeting/background-picker";
+import { useCall } from "@/components/meeting/call-provider";
 import {
   NO_BACKGROUND,
   type BackgroundEffect,
@@ -175,6 +176,7 @@ export function PreJoinLobby({
   const [isJoining, setIsJoining] = useState(false);
   const [passcode, setPasscode] = useState("");
   const [passcodeError, setPasscodeError] = useState<string | null>(null);
+  const { allowRejoin } = useCall();
   const [knockState, setKnockState] = useState<
     "idle" | "waiting" | "denied"
   >("idle");
@@ -637,6 +639,10 @@ export function PreJoinLobby({
   };
 
   const persistPreferencesAndEnter = (trimmedName: string) => {
+    // Coming through the lobby is an explicit decision to join, so any "you left
+    // this call" guard from a previous hang-up is cleared here.
+    allowRejoin(meetingCode);
+
     sessionStorage.setItem(
       `meeting:${meetingCode}:devices`,
       JSON.stringify({

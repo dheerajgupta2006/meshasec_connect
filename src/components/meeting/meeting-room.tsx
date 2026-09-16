@@ -92,11 +92,37 @@ export function MeetingRoom({
   meetingTitle,
   isHost,
 }: MeetingRoomProps) {
-  const { session, status, error, joinCall, retry } = useCall();
+  const { session, status, error, joinCall, leftCode, rejoinCall, retry } =
+    useCall();
+
+  const hasLeft = leftCode === meetingCode;
 
   useEffect(() => {
+    // `joinCall` refuses a room the user hung up on, so this cannot reconnect
+    // them against their wishes. Rejoining is an explicit button below.
     joinCall({ meetingCode, meetingTitle, isHost });
   }, [joinCall, meetingCode, meetingTitle, isHost]);
+
+  // Hung up, or dropped. Sitting on the meeting page must not silently
+  // reconnect — that is what made the call impossible to end.
+  if (hasLeft && session === null) {
+    return (
+      <RoomNotice
+        title="You left the call"
+        description="You are no longer connected to this meeting."
+        meetingCode={meetingCode}
+        tone="loading"
+      >
+        <Button
+          type="button"
+          onClick={() => rejoinCall({ meetingCode, meetingTitle, isHost })}
+        >
+          <RotateCcw className="h-4 w-4" />
+          Rejoin call
+        </Button>
+      </RoomNotice>
+    );
+  }
 
   if (error !== null) {
     return (
