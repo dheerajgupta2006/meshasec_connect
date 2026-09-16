@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { respondToCallInvite } from "@/app/connections/actions";
 import { Button } from "@/components/ui/button";
 import { useRingtone } from "@/hooks/use-ringtone";
+import { installAudioUnlock } from "@/lib/audio-unlock";
 
 interface IncomingCall {
   meetingCode: string;
@@ -106,6 +107,11 @@ export function IncomingCallBanner() {
   useEffect(() => {
     dismissedRef.current = readDismissed();
   }, []);
+
+  // Unlocks audio on the user's first interaction anywhere in the app, so the
+  // ringtone is ready before a call arrives rather than being refused at ring
+  // time. Costs nothing after the first click; the listeners remove themselves.
+  useEffect(() => installAudioUnlock(), []);
 
   const inFlightRef = useRef(false);
 

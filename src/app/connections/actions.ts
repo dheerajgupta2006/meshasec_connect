@@ -22,6 +22,7 @@ import {
   generateRoomPasscode,
 } from "@/lib/meetings/meeting-code";
 import { prisma } from "@/lib/prisma";
+import { pushConfigured, sendPushToUser } from "@/lib/push/send";
 import { consumeRateLimit, describeRetryAfter } from "@/lib/rate-limit";
 import { ensureCurrentUser, normalizeUsername } from "@/lib/users/current-user";
 
@@ -312,6 +313,33 @@ async function ringViaInvite(
 }
 
 /**
+ * Pushes a ringing notification to the callee's devices.
+ *
+ * This is what reaches a closed or backgrounded tab, which polling cannot: a
+ * closed tab runs no code, and a background tab has its timers throttled. It also
+ * arrives in about a second rather than on the next poll.
+ *
+ * Fire-and-forget and never throws — a failed notification must not stop the call.
+ */
+async function pushCallNotification(
+  receiverId: string,
+  callerName: string,
+  meetingCode: string,
+  isGroupInvite: boolean,
+): Promise<void> {
+  if (!pushConfigured()) {
+    return;
+  }
+
+  await sendPushToUser(receiverId, {
+    kind: "call",
+    meetingCode,
+    callerName,
+    isGroupInvite,
+  }).catch(() => undefined);
+}
+
+/**
  * The security gate for calling. Creates a 1-on-1 meeting only when an ACCEPTED
  * connection exists, and enrolls both people so it appears on both dashboards.
  */
@@ -381,6 +409,13 @@ export async function startDirectCall(
     // timestamp, so refreshing it rings them again for the same room.
     await ringViaInvite(existing.id, me.id, contact.id);
 
+    await pushCallNotification(
+      contact.id,
+      me.name ?? "Someone",
+      existing.meetingCode,
+      false,
+    );
+
     refreshViews();
 
     return {
@@ -413,6 +448,13 @@ export async function startDirectCall(
         },
         select: { meetingCode: true },
       });
+
+      await pushCallNotification(
+        contact.id,
+        me.name ?? "Someone",
+        meetingCode,
+        false,
+      );
 
       refreshViews();
 
@@ -675,6 +717,13 @@ export async function inviteFriendToCall(
 
     return { ok: false, message: "We could not send that invite." };
   }
+
+  await pushCallNotification(
+    friend.id,
+    me.name ?? "Someone",
+    meetingCode,
+    true,
+  );
 
   refreshViews();
 

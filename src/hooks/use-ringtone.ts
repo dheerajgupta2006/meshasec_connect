@@ -2,6 +2,8 @@
 
 import { useEffect, useRef } from "react";
 
+import { primeAudio, runningAudioContext } from "@/lib/audio-unlock";
+
 /**
  * Plays a ring tone while a call is incoming.
  *
@@ -27,24 +29,8 @@ const CYCLE_MS = 2600;
 const PEAK_GAIN = 0.16;
 
 interface RingtoneHandle {
-  context: AudioContext;
   timers: number[];
   stopped: boolean;
-}
-
-type AudioContextConstructor = new () => AudioContext;
-
-function resolveAudioContext(): AudioContextConstructor | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-
-  const candidate =
-    window.AudioContext ??
-    (window as unknown as { webkitAudioContext?: AudioContextConstructor })
-      .webkitAudioContext;
-
-  return candidate ?? null;
 }
 
 /**
@@ -92,57 +78,39 @@ export function useRingtone(active: boolean): void {
       return;
     }
 
-    const Ctor = resolveAudioContext();
+    // Attempt a resume in case a gesture has happened since the last try. The
+    // context itself is created during the user's first interaction by
+    // `installAudioUnlock`, because permission is granted to the gesture rather
+    // than to the page — a context created here, at ring time, would be refused.
+    primeAudio();
 
-    if (Ctor === null) {
-      return;
-    }
-
-    let handle: RingtoneHandle;
-
-    try {
-      handle = { context: new Ctor(), timers: [], stopped: false };
-    } catch {
-      // Some environments refuse to construct a context at all.
-      return;
-    }
-
+    const handle: RingtoneHandle = { timers: [], stopped: false };
     handleRef.current = handle;
 
     const ring = () => {
-      if (handle.stopped || handle.context.state !== "running") {
+      const context = runningAudioContext();
+
+      if (handle.stopped || context === null) {
         return;
       }
 
-      const now = handle.context.currentTime;
-      scheduleBurst(handle.context, now, TONE_A);
-      scheduleBurst(handle.context, now + (BURST_MS + GAP_MS) / 1000, TONE_B);
+      const now = context.currentTime;
+      scheduleBurst(context, now, TONE_A);
+      scheduleBurst(context, now + (BURST_MS + GAP_MS) / 1000, TONE_B);
     };
 
-    // `resume` is a promise because the browser may prompt or refuse. A rejection
-    // is expected and simply means this call rings silently.
-    void handle.context
-      .resume()
-      .then(() => {
-        if (handle.stopped) {
-          return;
-        }
+    ring();
 
-        ring();
-
-        const repeat = window.setInterval(ring, CYCLE_MS);
-        handle.timers.push(repeat);
-      })
-      .catch(() => undefined);
+    const repeat = window.setInterval(ring, CYCLE_MS);
+    handle.timers.push(repeat);
 
     return () => {
       handle.stopped = true;
       handle.timers.forEach((timer) => window.clearInterval(timer));
       handle.timers = [];
-      // Closing releases the audio hardware; without it a long session
-      // accumulates suspended contexts, and browsers cap how many may exist.
-      void handle.context.close().catch(() => undefined);
       handleRef.current = null;
+      // The context is shared and deliberately not closed: it stays unlocked for
+      // the next call, and closing it would need another user gesture to reopen.
     };
   }, [active]);
 }

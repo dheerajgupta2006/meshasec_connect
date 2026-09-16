@@ -13,6 +13,7 @@ import { NotificationsMenu } from "@/components/connections/notifications-menu";
 import { MarketingNav } from "@/components/marketing-nav";
 import { CallProvider } from "@/components/meeting/call-provider";
 import { MessagesNavLink } from "@/components/messages/messages-nav-link";
+import { PushToggle } from "@/components/notifications/push-toggle";
 import { ThemeProvider } from "@/components/theme/theme-provider";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { Toaster } from "@/components/ui/sonner";
@@ -79,6 +80,9 @@ export default function RootLayout({
               <MarketingNav />
 
               <div className="flex items-center gap-1.5 sm:gap-2.5">
+                <SignedIn>
+                  <PushToggle />
+                </SignedIn>
                 <ThemeToggle />
                 <HeaderAuthControls
                   signedInSlot={

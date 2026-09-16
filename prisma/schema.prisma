@@ -41,6 +41,34 @@ model User {
   receivedCallInvites CallInvite[]     @relation("CallInviteReceiver")
   waitingRoomEntries  WaitingRoomEntry[] @relation("WaitingGuest")
   currentlyHosting    Meeting[]          @relation("MeetingCurrentHost")
+  pushSubscriptions   PushSubscription[]
+}
+
+/// A browser's push endpoint, so a call can reach someone whose tab is closed.
+///
+/// One row per browser, not per user: the same person on a laptop and a phone has
+/// two, and both should ring.
+model PushSubscription {
+  id     String @id @default(cuid())
+  userId String
+
+  /// Provided by the browser. Unique per subscription, and the natural key —
+  /// re-subscribing the same browser must update rather than duplicate.
+  endpoint String @unique
+  /// Public key from the browser's keypair, used to encrypt the payload.
+  p256dh String
+  auth   String
+
+  /// Kept for diagnostics only; never used to decide anything.
+  userAgent String?
+
+  createdAt DateTime @default(now())
+  /// Bumped on every successful send, so dead endpoints are identifiable.
+  lastUsedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 /// A one-to-one message. Only ever readable or writable by the two people named
