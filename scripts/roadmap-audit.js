@@ -42,8 +42,10 @@ const CHECKS = [
   ["AI transcription", /transcri/i],
   ["Background blur", /BackgroundBlur|backgroundBlur/],
   ["Custom virtual backgrounds", /VirtualBackground/],
-  ["Whiteboard", /tldraw|excalidraw/i],
-  ["Polls / Q&A", /createPoll|PollOption|pollVote/],
+  // Matches the in-house canvas board as well as a third-party library, since the
+  // feature is "there is a whiteboard", not "we installed tldraw".
+  ["Whiteboard", /tldraw|excalidraw|reduceWhiteboard/i],
+  ["Polls / Q&A", /reducePolls|openPoll/],
   ["TIER 3", null],
   ["Calendar .ics + links", /buildIcsCalendar/],
   ["Emailed calendar invites", /calendarInviteEmail|attachIcs/],

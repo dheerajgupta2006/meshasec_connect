@@ -2,12 +2,14 @@
 
 import { useLocalParticipant, useParticipants } from "@livekit/components-react";
 import {
+  BarChart3,
   Hand,
   LayoutGrid,
   MessageSquare,
   Mic,
   MicOff,
   MonitorUp,
+  PenLine,
   PhoneOff,
   Smile,
   SquareUser,
@@ -37,7 +39,12 @@ import { InviteToCallModal } from "./invite-to-call-modal";
 import { ReactionPicker, useReactions } from "./reactions";
 import type { LayoutMode } from "./video-grid";
 
-export type DrawerId = "chat" | "participants" | null;
+export type DrawerId =
+  | "chat"
+  | "participants"
+  | "polls"
+  | "board"
+  | null;
 
 /**
  * Hard ceiling on a push-to-talk hold. If a `keyup` never arrives — an OS
@@ -441,6 +448,28 @@ export function ControlDock({
           aria-pressed={activeDrawer === "participants"}
           onClick={() => toggleDrawer("participants")}
           icon={<Users className="h-5 w-5" aria-hidden="true" />}
+        />
+
+        <DockButton
+          label={
+            activeDrawer === "board" ? "Close whiteboard" : "Open whiteboard"
+          }
+          tone={activeDrawer === "board" ? "on" : "neutral"}
+          aria-pressed={activeDrawer === "board"}
+          onClick={() => toggleDrawer("board")}
+          icon={<PenLine className="h-5 w-5" aria-hidden="true" />}
+        />
+
+        <DockButton
+          label={
+            activeDrawer === "polls"
+              ? "Close polls and questions"
+              : "Open polls and questions"
+          }
+          tone={activeDrawer === "polls" ? "on" : "neutral"}
+          aria-pressed={activeDrawer === "polls"}
+          onClick={() => toggleDrawer("polls")}
+          icon={<BarChart3 className="h-5 w-5" aria-hidden="true" />}
         />
 
         <BackgroundControl initialEffect={initialBackgroundEffect} />
