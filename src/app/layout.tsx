@@ -96,7 +96,25 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <ClerkProvider>
+    // Without these, Clerk's post-auth redirect defaults to `/` — so signing in
+    // through the header modal dropped you back on the landing page with a
+    // "Dashboard" button instead of going there.
+    //
+    // `fallback`, deliberately not `force`: two flows in this app legitimately
+    // carry a `redirect_url`, and `force` would override both. `middleware.ts`
+    // protects most routes, so a user who followed a link to a DM thread signs
+    // in and must land on that thread; and `GuestGate` links to
+    // `/sign-in?redirect_url=/meeting/<code>/lobby`, so an invited guest who
+    // chooses to sign in has to arrive at the meeting, not the dashboard.
+    // `fallback` honours those and only sends people to the dashboard when there
+    // is nowhere else they were headed.
+    //
+    // Set as props rather than `NEXT_PUBLIC_CLERK_*_FALLBACK_REDIRECT_URL` so the
+    // behaviour ships with the code and needs no matching Vercel env var.
+    <ClerkProvider
+      signInFallbackRedirectUrl="/dashboard"
+      signUpFallbackRedirectUrl="/dashboard"
+    >
       {/* next-themes writes the resolved class onto <html> before paint, which
           the server render cannot predict. Suppressing the warning on this one
           element is the documented way to allow it. */}
