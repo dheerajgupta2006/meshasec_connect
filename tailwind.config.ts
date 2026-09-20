@@ -67,6 +67,32 @@ const config: Config = {
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
       },
+      /**
+       * Only decorative motion lives here. `tailwindcss-animate` is deliberately
+       * not installed, and the global `prefers-reduced-motion` rule in
+       * `globals.css` zeroes every animation, so anything defined below must
+       * still read correctly when frozen on its first frame.
+       */
+      keyframes: {
+        /**
+         * Drives the landing page's language ticker. The track renders its list
+         * twice, so shifting by exactly half its width lands back on an
+         * identical frame and the loop has no visible seam.
+         */
+        "marquee-x": {
+          from: { transform: "translateX(0)" },
+          to: { transform: "translateX(-50%)" },
+        },
+        /** Slow drift for the hero's background gradient blooms. */
+        drift: {
+          "0%, 100%": { transform: "translate3d(0, 0, 0) scale(1)" },
+          "50%": { transform: "translate3d(0, -6%, 0) scale(1.08)" },
+        },
+      },
+      animation: {
+        "marquee-x": "marquee-x 44s linear infinite",
+        drift: "drift 18s ease-in-out infinite",
+      },
     },
   },
   plugins: [],

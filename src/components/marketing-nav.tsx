@@ -17,6 +17,7 @@ const HIDDEN_PREFIXES = ["/meeting", "/messages"];
  * drift apart.
  */
 export const MARKETING_LINKS = [
+  { href: "/#translation", label: "Translation" },
   { href: "/#features", label: "Features" },
   { href: "/#how-it-works", label: "How it works" },
   { href: "/#security", label: "Security" },

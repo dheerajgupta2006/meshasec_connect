@@ -7,80 +7,15 @@ import { useState, useTransition, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { resolveJoinCode } from "@/lib/meetings/join-code";
 
 /**
- * The Meeting_Code alphabet: unpadded base64url, mirrored from the server's
- * generator contract. Used only to reject obvious junk before navigating; the
- * lobby route remains the authority on whether a meeting exists.
- */
-const MEETING_CODE_PATTERN = /^[A-Za-z0-9_-]+$/;
-
-/** Route segments that follow the code in an invite URL. */
-const TRAILING_ROUTE_SEGMENTS = new Set(["lobby", "room"]);
-
-const EMPTY_MESSAGE = "Enter a meeting code or paste an invite link.";
-const SHAPE_MESSAGE =
-  "That does not look like a meeting code. Check the link and try again.";
-
-/**
- * Accepts either a bare code or a pasted invite URL.
+ * Dashboard "join by code" field.
  *
- * An invite link is `https://host/meeting/<code>/lobby`, so the last path
- * segment is the route, not the code. The code is taken from just after the
- * `meeting` segment when one is present, and only otherwise from the final
- * segment — which is what makes both a pasted link and a hand-typed code work.
+ * The parsing lives in `@/lib/meetings/join-code` because the landing page hero
+ * offers the same affordance; this component is only the dashboard's presentation
+ * of it, styled for the dark action card it sits inside.
  */
-function extractMeetingCode(raw: string): string {
-  const trimmed = raw.trim();
-
-  if (trimmed.length === 0) {
-    return "";
-  }
-
-  // Drop any query string or fragment before looking at path segments.
-  const pathOnly = trimmed.split(/[?#]/)[0] ?? "";
-  const segments = pathOnly
-    .split("/")
-    .map((segment) => safeDecode(segment.trim()))
-    .filter((segment) => segment.length > 0);
-
-  if (segments.length === 0) {
-    return "";
-  }
-
-  const meetingIndex = segments.lastIndexOf("meeting");
-
-  if (meetingIndex !== -1) {
-    const afterMeeting: string | undefined = segments[meetingIndex + 1];
-
-    if (afterMeeting !== undefined) {
-      return afterMeeting;
-    }
-  }
-
-  const last: string | undefined = segments[segments.length - 1];
-
-  if (last === undefined) {
-    return "";
-  }
-
-  // A URL that ends in a known route segment still carries the code before it.
-  if (TRAILING_ROUTE_SEGMENTS.has(last.toLowerCase()) && segments.length > 1) {
-    return segments[segments.length - 2] ?? "";
-  }
-
-  return last;
-}
-
-/** `decodeURIComponent` throws on malformed input, so the raw value stands in. */
-function safeDecode(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
 export function JoinByCode() {
   const router = useRouter();
   const [value, setValue] = useState("");
@@ -96,20 +31,16 @@ export function JoinByCode() {
       return;
     }
 
-    const code = extractMeetingCode(value);
+    const result = resolveJoinCode(value);
 
-    if (code.length === 0) {
-      setError(EMPTY_MESSAGE);
-      return;
-    }
-    if (!MEETING_CODE_PATTERN.test(code)) {
-      setError(SHAPE_MESSAGE);
+    if (!result.ok) {
+      setError(result.message);
       return;
     }
 
     setError(null);
     startTransition(() => {
-      router.push(`/meeting/${encodeURIComponent(code)}/lobby`);
+      router.push(result.href);
     });
   }
 
