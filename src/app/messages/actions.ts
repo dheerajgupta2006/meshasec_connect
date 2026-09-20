@@ -14,15 +14,46 @@ import { revalidatePath } from "next/cache";
 import { areUsersConnected } from "@/lib/connections/queries";
 import { searchMessages } from "@/lib/messages/queries";
 import { prisma } from "@/lib/prisma";
+import { pushConfigured, sendPushToUser } from "@/lib/push/send";
 import { consumeRateLimit, describeRetryAfter } from "@/lib/rate-limit";
 import { ensureCurrentUser } from "@/lib/users/current-user";
 
 /** Bounds the idempotency key so it cannot be used to store bulk data. */
 const MAX_CLIENT_ID_CHARS = 64;
 
+/** Keeps a push notification body to a glanceable length. */
+const PUSH_PREVIEW_CHARS = 120;
+
 export interface MessageActionResult {
   ok: boolean;
   message: string;
+}
+
+/**
+ * The committed row, shaped exactly like the thread's wire format.
+ *
+ * Returned so the client can swap its optimistic bubble for the real message
+ * without a follow-up fetch. Before this, a send cost four serialized requests
+ * (action, poll, mark-read, refresh) before the text appeared at all.
+ */
+export interface SentMessageView {
+  id: string;
+  body: string;
+  createdAt: string;
+  outgoing: boolean;
+  editedAt: string | null;
+  deleted: boolean;
+  replyTo: {
+    id: string;
+    body: string | null;
+    deleted: boolean;
+    outgoing: boolean;
+  } | null;
+}
+
+export interface SendMessageResult extends MessageActionResult {
+  /** Present only when `ok`; null on every refusal. */
+  sent: SentMessageView | null;
 }
 
 const MAX_BODY_CHARS = 4000;
@@ -94,46 +125,51 @@ export async function sendDirectMessage(
   rawBody: string,
   clientId?: string,
   replyToId?: string,
-): Promise<MessageActionResult> {
+): Promise<SendMessageResult> {
   const me = await ensureCurrentUser();
 
   if (me === null) {
-    return { ok: false, message: SIGN_IN_REQUIRED };
+    return { ok: false, message: SIGN_IN_REQUIRED, sent: null };
   }
 
   const throttled = checkWriteQuota(me.id);
 
   if (throttled !== null) {
-    return throttled;
+    return { ...throttled, sent: null };
   }
 
   const validated = validateBody(rawBody);
 
   if (!validated.ok) {
-    return { ok: false, message: validated.message };
+    return { ok: false, message: validated.message, sent: null };
   }
 
   const body = validated.body;
 
-  const recipient = await prisma.user.findUnique({
-    where: { id: recipientId },
-    select: { id: true, username: true },
-  });
+  if (recipientId === me.id) {
+    return { ok: false, message: "You cannot message yourself.", sent: null };
+  }
+
+  // Run in parallel: the connection check keys on `recipientId`, which is already
+  // known, so it never needed the profile lookup to finish first. This was two
+  // serialized round trips to Neon for no reason.
+  const [recipient, connected] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: recipientId },
+      select: { id: true, username: true },
+    }),
+    areUsersConnected(me.id, recipientId),
+  ]);
 
   if (recipient === null) {
-    return { ok: false, message: "That person no longer exists." };
+    return { ok: false, message: "That person no longer exists.", sent: null };
   }
-
-  if (recipient.id === me.id) {
-    return { ok: false, message: "You cannot message yourself." };
-  }
-
-  const connected = await areUsersConnected(me.id, recipient.id);
 
   if (!connected) {
     return {
       ok: false,
       message: notConnectedMessage(recipient.username ?? "this user"),
+      sent: null,
     };
   }
 
@@ -146,15 +182,28 @@ export async function sendDirectMessage(
   // people. Without that, anyone could quote a message out of a conversation
   // they are not part of and have its text rendered back to them.
   let quotedId: string | null = null;
+  let quotedView: SentMessageView["replyTo"] = null;
 
   if (typeof replyToId === "string" && replyToId.trim().length > 0) {
     const quoted = await prisma.directMessage.findUnique({
       where: { id: replyToId.trim() },
-      select: { id: true, senderId: true, receiverId: true },
+      // `body` and `deletedAt` come along so the reply can be rendered from this
+      // response alone, rather than costing the client another fetch.
+      select: {
+        id: true,
+        senderId: true,
+        receiverId: true,
+        body: true,
+        deletedAt: true,
+      },
     });
 
     if (quoted === null) {
-      return { ok: false, message: "That message no longer exists." };
+      return {
+        ok: false,
+        message: "That message no longer exists.",
+        sent: null,
+      };
     }
 
     const participants = [quoted.senderId, quoted.receiverId];
@@ -165,16 +214,25 @@ export async function sendDirectMessage(
       return {
         ok: false,
         message: "You can only quote a message from this conversation.",
+        sent: null,
       };
     }
 
     // A soft-deleted original is still a valid target: the reply renders
     // "Original message deleted" rather than losing its context.
     quotedId = quoted.id;
+    quotedView = {
+      id: quoted.id,
+      body: quoted.deletedAt === null ? quoted.body : null,
+      deleted: quoted.deletedAt !== null,
+      outgoing: quoted.senderId === me.id,
+    };
   }
 
+  let created: { id: string; createdAt: Date } | null = null;
+
   try {
-    await prisma.directMessage.create({
+    created = await prisma.directMessage.create({
       data: {
         senderId: me.id,
         receiverId: recipient.id,
@@ -182,7 +240,7 @@ export async function sendDirectMessage(
         clientId: idempotencyKey,
         replyToId: quotedId,
       },
-      select: { id: true },
+      select: { id: true, createdAt: true },
     });
   } catch (error: unknown) {
     // A retry or double-tap carrying the same key hits the unique index. The
@@ -195,11 +253,54 @@ export async function sendDirectMessage(
     if (!isDuplicate) {
       throw error;
     }
+
+    // The winning row is the one to report back, so a retry resolves to the same
+    // message the client already has rather than a second bubble.
+    if (idempotencyKey !== null) {
+      created = await prisma.directMessage.findFirst({
+        where: { senderId: me.id, clientId: idempotencyKey },
+        select: { id: true, createdAt: true },
+      });
+    }
   }
 
-  revalidateThread(recipient.username);
+  // Deliberately awaited, not floated. A promise left running after a Server
+  // Action returns is killed by the serverless runtime, so a fire-and-forget push
+  // would be delivered only sometimes. The client no longer waits on this
+  // response — it renders the message optimistically — so the cost is invisible.
+  if (pushConfigured()) {
+    await sendPushToUser(recipient.id, {
+      kind: "message",
+      fromName: me.name ?? `@${me.username}`,
+      fromUsername: me.username,
+      preview:
+        body.length > PUSH_PREVIEW_CHARS
+          ? `${body.slice(0, PUSH_PREVIEW_CHARS - 1)}…`
+          : body,
+    }).catch(() => undefined);
+  }
 
-  return { ok: true, message: "Sent." };
+  // Only the conversation list and the header's unread badge depend on server
+  // state here, and both are `noStore()` so they re-read on navigation anyway.
+  // Revalidating forced a full RSC re-render of this thread page into the action
+  // response — several more round trips to Singapore for a payload the client
+  // discards, since the thread owns its own message state.
+  return {
+    ok: true,
+    message: "Sent.",
+    sent:
+      created === null
+        ? null
+        : {
+            id: created.id,
+            body,
+            createdAt: created.createdAt.toISOString(),
+            outgoing: true,
+            editedAt: null,
+            deleted: false,
+            replyTo: quotedView,
+          },
+  };
 }
 
 /**

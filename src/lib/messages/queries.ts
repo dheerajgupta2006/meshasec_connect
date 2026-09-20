@@ -243,6 +243,66 @@ export async function countUnreadMessages(viewerId: string): Promise<number> {
   });
 }
 
+/** Just enough of an unread message to announce it. */
+export interface UnreadMessageAlert {
+  id: string;
+  /** Display name, already falling back to `@username`. */
+  fromName: string;
+  fromUsername: string;
+  /** Truncated body, safe to show in a toast. */
+  preview: string;
+}
+
+/** Keeps a toast body to a glanceable length. */
+const ALERT_PREVIEW_CHARS = 140;
+
+/**
+ * The newest unread message for a viewer, identified by Clerk subject.
+ *
+ * Keyed on `clerkId` rather than a local id on purpose: this is polled, and
+ * resolving the local user first would double the round trips for every tick. The
+ * filter goes through the receiver relation instead, exactly as the incoming-call
+ * poll does.
+ *
+ * Soft-deleted rows are excluded — announcing a message whose body will render as
+ * "This message was deleted" is worse than staying quiet. Note this is a narrower
+ * filter than `countUnreadMessages` uses for the badge, which is deliberate: the
+ * badge counts what is unread, this announces what is readable.
+ */
+export async function latestUnreadForClerkUser(
+  clerkId: string,
+): Promise<UnreadMessageAlert | null> {
+  const latest = await prisma.directMessage.findFirst({
+    where: {
+      readAt: null,
+      deletedAt: null,
+      receiver: { is: { clerkId } },
+    },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      body: true,
+      sender: { select: { name: true, username: true } },
+    },
+  });
+
+  if (latest === null) {
+    return null;
+  }
+
+  const username = latest.sender.username ?? "someone";
+
+  return {
+    id: latest.id,
+    fromName: latest.sender.name ?? `@${username}`,
+    fromUsername: username,
+    preview:
+      latest.body.length > ALERT_PREVIEW_CHARS
+        ? `${latest.body.slice(0, ALERT_PREVIEW_CHARS - 1)}…`
+        : latest.body,
+  };
+}
+
 export async function countUnreadFrom(
   viewerId: string,
   otherId: string,

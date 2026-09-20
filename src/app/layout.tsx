@@ -13,6 +13,7 @@ import { NotificationsMenu } from "@/components/connections/notifications-menu";
 import { MarketingNav } from "@/components/marketing-nav";
 import { MobileMenu } from "@/components/mobile-menu";
 import { CallProvider } from "@/components/meeting/call-provider";
+import { MessageNotifier } from "@/components/messages/message-notifier";
 import { MessagesNavLink } from "@/components/messages/messages-nav-link";
 import { PushToggle } from "@/components/notifications/push-toggle";
 import { ThemeProvider } from "@/components/theme/theme-provider";
@@ -175,6 +176,9 @@ export default function RootLayout({
           </header>
           <SignedIn>
             <IncomingCallBanner />
+            {/* Renders nothing; toasts arriving DMs and keeps the header's unread
+                badge current without a navigation. */}
+            <MessageNotifier />
           </SignedIn>
           {/* Holds the LiveKit connection above the router, so navigating does
               not tear the call down. */}

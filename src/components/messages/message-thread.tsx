@@ -32,6 +32,9 @@ import {
 } from "@/app/messages/actions";
 import { LinkPreviewCard } from "@/components/messages/link-preview-card";
 import { MessageBody } from "@/components/messages/message-body";
+import { TranslatedBody } from "@/components/messages/translated-body";
+import { TranslationPicker } from "@/components/messages/translation-picker";
+import { useThreadTranslation } from "@/components/messages/use-thread-translation";
 import { mintCreationRequestId } from "@/lib/meetings/creation-request-id";
 import { previewTarget } from "@/lib/messages/links";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -71,6 +74,13 @@ interface ThreadItem {
   editedAt: string | null;
   deleted: boolean;
   replyTo: QuotedMessageView | null;
+  /**
+   * Rendered locally and not yet acknowledged by the server.
+   *
+   * Only ever set on optimistic rows, so a message from the server is never
+   * mistaken for one in flight.
+   */
+  pending?: boolean;
 }
 
 interface MessageThreadProps {
@@ -188,7 +198,9 @@ export function MessageThread({
   );
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [isSending, startSending] = useTransition();
+  // The pending flag is deliberately unused: the composer must stay live while a
+  // send is in flight, and the bubble itself shows the in-flight state.
+  const [, startSending] = useTransition();
   const [isCalling, startCalling] = useTransition();
   const [isMutating, startMutating] = useTransition();
 
@@ -199,11 +211,26 @@ export function MessageThread({
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
 
+  /**
+   * Reader-side translation. Driven off `messages`, so a translation appears for
+   * anything the poll brings in without the send path having to know about it.
+   */
+  const translation = useThreadTranslation(contactUsername, messages);
+
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const editInputRef = useRef<HTMLInputElement | null>(null);
   const lastIdRef = useRef<string | null>(initialMessages.at(-1)?.id ?? null);
   /** Held across retries of one unsent message; cleared once it commits. */
   const pendingClientIdRef = useRef<string | null>(null);
+  /**
+   * Rows held on top of whatever the server last returned.
+   *
+   * Covers two cases that both otherwise make a just-sent message disappear:
+   * a poll that lands while the send is still open, and a poll that was already
+   * in flight when the send committed and so returns a payload predating it.
+   * Entries are dropped only once the id actually shows up in a poll.
+   */
+  const localRowsRef = useRef<ThreadItem[]>([]);
   const pollInFlightRef = useRef(false);
   /** DOM nodes by message id, so a quote can jump to its original. */
   const nodesRef = useRef(new Map<string, HTMLDivElement>());
@@ -234,16 +261,30 @@ export function MessageThread({
         return;
       }
 
-      setMessages(next);
+      // Retire local rows the server now reports, then re-append the rest so a
+      // poll can never drop a message the user can already see.
+      const known = new Set(next.map((item) => item.id));
+      localRowsRef.current = localRowsRef.current.filter(
+        (item) => !known.has(item.id),
+      );
 
-      const newestId = next.at(-1)?.id ?? null;
+      const extras = localRowsRef.current;
+      setMessages(extras.length === 0 ? next : [...next, ...extras]);
+
+      const newest = next.at(-1) ?? null;
+      const newestId = newest?.id ?? null;
 
       // Only clear unread when something actually arrived, so the poll does not
       // write to the database on every tick.
       if (newestId !== lastIdRef.current) {
         lastIdRef.current = newestId;
-        await markThreadRead(contactId);
-        router.refresh();
+
+        // Only incoming mail can be unread. This used to fire for your own sends
+        // too, costing a write plus a full tree refetch on every message.
+        if (newest !== null && !newest.outgoing) {
+          await markThreadRead(contactId);
+          router.refresh();
+        }
       }
     } catch {
       // A failed poll is not worth surfacing; the next tick retries.
@@ -328,7 +369,7 @@ export function MessageThread({
 
     const body = draft.trim();
 
-    if (body.length === 0 || isSending) {
+    if (body.length === 0) {
       return;
     }
 
@@ -339,25 +380,79 @@ export function MessageThread({
     const clientId = pendingClientIdRef.current ?? mintCreationRequestId();
     pendingClientIdRef.current = clientId;
 
-    const quotedId = replyTarget?.id;
+    const quoted = replyTarget;
+
+    // Shown before the request leaves, and reconciled when it returns. Waiting on
+    // the server meant a round trip to Singapore, a poll, a mark-read and a tree
+    // refetch all had to finish before the text appeared — with the composer
+    // frozen throughout. The database is still the source of truth; the UI just
+    // stops blocking on it.
+    const optimisticId = `pending:${clientId}`;
+    const optimistic: ThreadItem = {
+      id: optimisticId,
+      body,
+      createdAt: new Date().toISOString(),
+      outgoing: true,
+      editedAt: null,
+      deleted: false,
+      replyTo:
+        quoted === null
+          ? null
+          : {
+              id: quoted.id,
+              body: quoted.deleted ? null : quoted.body,
+              deleted: quoted.deleted,
+              outgoing: quoted.outgoing,
+            },
+      pending: true,
+    };
+
+    localRowsRef.current = [...localRowsRef.current, optimistic];
+    setMessages((current) => [...current, optimistic]);
+    setDraft("");
+    setReplyTarget(null);
 
     startSending(async () => {
       const outcome = await sendDirectMessage(
         contactId,
         body,
         clientId,
-        quotedId,
+        quoted?.id,
       );
 
       if (!outcome.ok) {
         setError(outcome.message);
+        localRowsRef.current = localRowsRef.current.filter(
+          (item) => item.id !== optimisticId,
+        );
+        setMessages((current) =>
+          current.filter((item) => item.id !== optimisticId),
+        );
+        // Hand the text back so it is not lost, but never clobber something the
+        // user has started typing since. `pendingClientIdRef` is left set, so the
+        // retry reuses the key and cannot create a duplicate.
+        setDraft((current) => (current.length === 0 ? body : current));
         return;
       }
 
       pendingClientIdRef.current = null;
-      setDraft("");
-      setReplyTarget(null);
-      await refresh();
+
+      // A null `sent` means the row committed but could not be read back. Keep
+      // the optimistic bubble under its temporary id and let a poll reconcile it.
+      const settled: ThreadItem =
+        outcome.sent === null
+          ? { ...optimistic, pending: false }
+          : { ...outcome.sent, pending: false };
+
+      // Swapped in place rather than removed: until a poll actually returns this
+      // id, it is the only record the UI has of the message.
+      localRowsRef.current = localRowsRef.current.map((item) =>
+        item.id === optimisticId ? settled : item,
+      );
+
+      setMessages((current) =>
+        current.map((item) => (item.id === optimisticId ? settled : item)),
+      );
     });
   }
 
@@ -467,6 +562,13 @@ export function MessageThread({
             @{contactUsername}
           </p>
         </div>
+        <TranslationPicker
+          status={translation.status}
+          target={translation.target}
+          progress={translation.progress}
+          onChange={translation.setTarget}
+        />
+
         <Button
           type="button"
           size="sm"
@@ -504,6 +606,9 @@ export function MessageThread({
             const linkTarget = message.deleted
               ? null
               : previewTarget(message.body);
+            // Null when translation is off, still running, or the model returned
+            // the original unchanged.
+            const translated = translation.translationFor(message.id);
 
             return (
               <div
@@ -516,7 +621,7 @@ export function MessageThread({
                 }`}
               >
                 <div
-                  className={`max-w-[85%] rounded-2xl px-3 py-2.5 transition-shadow sm:max-w-[75%] sm:px-4 ${
+                  className={`max-w-[85%] rounded-2xl px-3 py-2.5 transition-opacity sm:max-w-[75%] sm:px-4 ${
                     message.outgoing
                       ? "bg-primary-emphasis text-primary-emphasis-foreground"
                       : "bg-muted text-foreground"
@@ -524,7 +629,7 @@ export function MessageThread({
                     highlightId === message.id
                       ? "ring-2 ring-ring ring-offset-2 ring-offset-background"
                       : ""
-                  }`}
+                  } ${message.pending === true ? "opacity-60" : ""}`}
                 >
                   {quoted !== null && (
                     <button
@@ -628,6 +733,18 @@ export function MessageThread({
                         body={message.body}
                         outgoing={message.outgoing}
                       />
+
+                      {/* Below the original, never in place of it: a reader has
+                          to be able to check a confusing translation against
+                          what was actually sent. */}
+                      {translated !== null && translation.target !== null && (
+                        <TranslatedBody
+                          text={translated.text}
+                          sourceLanguage={translated.sourceLanguage}
+                          targetLanguage={translation.target}
+                          outgoing={message.outgoing}
+                        />
+                      )}
 
                       {/* One card per message, for the first link only. Several
                           cards would dominate the thread. */}
@@ -788,21 +905,16 @@ export function MessageThread({
           }
           maxLength={4000}
           autoComplete="off"
-          disabled={isSending}
           className="h-11 min-w-0 flex-1 border-input-strong sm:h-10"
         />
         <Button
           type="submit"
           size="icon"
-          disabled={isSending || draft.trim().length === 0}
+          disabled={draft.trim().length === 0}
           className="h-11 w-11 shrink-0 sm:h-10 sm:w-10"
           aria-label={replyTarget === null ? "Send message" : "Send reply"}
         >
-          {isSending ? (
-            <LoaderCircle className="h-4 w-4 animate-spin" />
-          ) : (
-            <Send className="h-4 w-4" />
-          )}
+          <Send className="h-4 w-4" />
         </Button>
       </form>
     </div>
