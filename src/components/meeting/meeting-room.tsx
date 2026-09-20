@@ -179,7 +179,9 @@ export function MeetingRoom({
   }
 
   return (
-    <div className="h-[calc(100vh-4rem)] w-full bg-zinc-950">
+    // `overflow-hidden` is a last line of defence: the room is a fixed-height
+    // surface, and nothing inside it should ever be able to scroll the page.
+    <div className="h-[calc(100vh-4rem)] w-full overflow-hidden bg-zinc-950">
       {/* Roles come from `MeetingRolesProvider`, not from this prop: they change
           mid-call when the host appoints a co-host. */}
       <MeetingStage meetingTitle={meetingTitle} meetingCode={meetingCode} />

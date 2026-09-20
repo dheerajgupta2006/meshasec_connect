@@ -217,8 +217,13 @@ export function VideoGrid({ layout, className }: VideoGridProps): React.JSX.Elem
     );
 
     return (
-      <div className={cn("flex min-h-0 flex-col gap-3", className)}>
-        <div className="min-h-0 flex-1">{renderTile(spotlight, "spotlight")}</div>
+      <div className={cn("flex min-h-0 min-w-0 flex-col gap-3", className)}>
+        {/* `min-w-0` matters in a flex column: without it a wide screen share can
+            set the flex item's min-content width and push the row past the
+            viewport, which no amount of zooming out fixes. */}
+        <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+          {renderTile(spotlight, "spotlight")}
+        </div>
 
         {thumbnails.length > 0 && (
           <ul

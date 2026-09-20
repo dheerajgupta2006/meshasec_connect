@@ -211,7 +211,13 @@ export function ParticipantVideoTile({
   return (
     <div
       className={cn(
-        "group relative isolate flex min-h-0 min-w-0 items-center justify-center overflow-hidden bg-zinc-900 ring-1 ring-inset ring-white/10 transition-shadow duration-300",
+        // `h-full w-full` is load-bearing, not cosmetic. The <video> inside is
+        // sized with `h-full`, which resolves against *this* element — and while
+        // this element had auto height the percentage could not resolve, so the
+        // video fell back to the track's intrinsic size. A 1080p-or-larger screen
+        // share then rendered at native pixels and forced the whole page wider
+        // than the viewport.
+        "group relative isolate flex h-full w-full min-h-0 min-w-0 items-center justify-center overflow-hidden bg-zinc-900 ring-1 ring-inset ring-white/10 transition-shadow duration-300",
         variant === "thumbnail" ? "rounded-xl" : "rounded-2xl",
         isSpeaking &&
           !isScreenShare &&
@@ -233,7 +239,10 @@ export function ParticipantVideoTile({
         <VideoTrack
           trackRef={trackRef}
           className={cn(
-            "h-full w-full",
+            // `max-*` as well as `h/w-full`: a belt-and-braces guard so that even
+            // if an ancestor's height is ever indefinite again, the intrinsic
+            // video size still cannot exceed its box and push the layout out.
+            "h-full max-h-full w-full max-w-full",
             videoFit,
             mirrored && isLocal && !isScreenShare && "-scale-x-100",
           )}
