@@ -181,7 +181,12 @@ export function MeetingRoom({
   return (
     // `overflow-hidden` is a last line of defence: the room is a fixed-height
     // surface, and nothing inside it should ever be able to scroll the page.
-    <div className="h-[calc(100vh-4rem)] w-full overflow-hidden bg-zinc-950">
+    //
+    // `dvh`, not `vh`: mobile browsers count the URL bar in `100vh`, so this box
+    // would be taller than what you can actually see — and the control dock is
+    // absolutely pinned to its bottom edge, which put Leave/mute underneath the
+    // Safari toolbar with no way to scroll to them.
+    <div className="h-[calc(100dvh-4rem)] w-full overflow-hidden bg-zinc-950">
       {/* Roles come from `MeetingRolesProvider`, not from this prop: they change
           mid-call when the host appoints a co-host. */}
       <MeetingStage meetingTitle={meetingTitle} meetingCode={meetingCode} />

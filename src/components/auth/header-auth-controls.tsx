@@ -51,7 +51,9 @@ export function HeaderAuthControls({
       </SignedOut>
 
       <SignedIn>
-        <Button asChild variant="ghost" size="sm">
+        {/* The widest item in the header cluster, and the one control that has a
+            home in `MobileMenu`. Hidden below `sm` so a phone header fits. */}
+        <Button asChild variant="ghost" size="sm" className="hidden sm:inline-flex">
           <Link href="/dashboard">Dashboard</Link>
         </Button>
         {signedInSlot}

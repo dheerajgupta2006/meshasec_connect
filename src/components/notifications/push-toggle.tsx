@@ -49,7 +49,17 @@ function decodeVapidKey(base64: string): ArrayBuffer {
 
 const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? "";
 
-export function PushToggle() {
+interface PushToggleProps {
+  /**
+   * Renders the control as a labelled settings row instead of a bare icon
+   * button, for the mobile header menu. Set here rather than in the caller so an
+   * unsupported browser drops the label with the button — a caller-side wrapper
+   * would be left holding an empty row.
+   */
+  rowLabel?: string;
+}
+
+export function PushToggle({ rowLabel }: PushToggleProps = {}) {
   const [state, setState] = React.useState<PushState>("checking");
 
   React.useEffect(() => {
@@ -157,8 +167,22 @@ export function PushToggle() {
     return null;
   }
 
-  if (state === "denied") {
+  /** Wraps the button in a labelled row when `rowLabel` is set. */
+  function shell(control: React.JSX.Element): React.JSX.Element {
+    if (rowLabel === undefined) {
+      return control;
+    }
+
     return (
+      <div className="flex h-11 items-center justify-between gap-3 px-3">
+        <span className="text-sm text-muted-foreground">{rowLabel}</span>
+        {control}
+      </div>
+    );
+  }
+
+  if (state === "denied") {
+    return shell(
       <Button
         type="button"
         size="icon"
@@ -175,7 +199,7 @@ export function PushToggle() {
 
   const on = state === "on";
 
-  return (
+  return shell(
     <Button
       type="button"
       size="icon"
@@ -202,6 +226,6 @@ export function PushToggle() {
       ) : (
         <Bell className="h-[18px] w-[18px]" />
       )}
-    </Button>
+    </Button>,
   );
 }

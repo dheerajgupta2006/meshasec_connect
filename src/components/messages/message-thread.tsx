@@ -451,7 +451,10 @@ export function MessageThread({
   }
 
   return (
-    <div className="flex h-[calc(100vh-8rem)] flex-col rounded-xl border bg-card">
+    // `dvh` so the composer stays on screen on a phone: with `vh` the card is as
+    // tall as the viewport *plus* the URL bar, which pushed the input below the
+    // fold and left the page and the message log both scrolling independently.
+    <div className="flex h-[calc(100dvh-8rem)] flex-col rounded-xl border bg-card">
       <header className="flex items-center gap-3 border-b px-3 py-3 sm:px-4">
         <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
           <UserRound className="h-5 w-5" />

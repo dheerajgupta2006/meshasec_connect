@@ -3,7 +3,7 @@ import {
   SignedIn,
 } from "@clerk/nextjs";
 import { Video } from "lucide-react";
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import Link from "next/link";
 
@@ -11,6 +11,7 @@ import { HeaderAuthControls } from "@/components/auth/header-auth-controls";
 import { IncomingCallBanner } from "@/components/calls/incoming-call-banner";
 import { NotificationsMenu } from "@/components/connections/notifications-menu";
 import { MarketingNav } from "@/components/marketing-nav";
+import { MobileMenu } from "@/components/mobile-menu";
 import { CallProvider } from "@/components/meeting/call-provider";
 import { MessagesNavLink } from "@/components/messages/messages-nav-link";
 import { PushToggle } from "@/components/notifications/push-toggle";
@@ -66,6 +67,29 @@ export const metadata: Metadata = {
   },
 };
 
+/**
+ * Next injects a default viewport tag, but not the two settings that matter on
+ * a phone:
+ *
+ * - `interactiveWidget: "resizes-content"` shrinks the layout when the on-screen
+ *   keyboard opens. Under the default the keyboard overlays the page, hiding the
+ *   bottom-anchored message composer behind it while you type into it.
+ * - `themeColor` paints the browser chrome to match, so the address bar does not
+ *   sit as a white band above a dark call.
+ *
+ * `maximumScale`/`userScalable` are deliberately left alone: pinch-zoom is an
+ * accessibility requirement and blocking it is a WCAG failure.
+ */
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  interactiveWidget: "resizes-content",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
+    { media: "(prefers-color-scheme: dark)", color: "#09090b" },
+  ],
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -89,27 +113,36 @@ export default function RootLayout({
             disableTransitionOnChange
           >
           <header className="sticky top-0 z-50 h-16 border-b bg-background/80 backdrop-blur-xl supports-[backdrop-filter]:bg-background/70">
-            <div className="mx-auto flex h-full max-w-7xl items-center justify-between gap-6 px-4 sm:px-6 lg:px-8">
+            <div className="mx-auto flex h-full max-w-7xl items-center justify-between gap-2 px-4 sm:gap-6 sm:px-6 lg:px-8">
               <Link
                 href="/"
-                className="group flex items-center gap-2.5 font-semibold tracking-tight"
+                className="group flex min-w-0 items-center gap-2.5 font-semibold tracking-tight"
                 aria-label="Meshasec Connect home"
               >
-                <span className="grid h-9 w-9 place-items-center rounded-xl bg-primary text-primary-foreground shadow-sm shadow-primary/25 transition-transform group-hover:scale-105">
+                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-primary text-primary-foreground shadow-sm shadow-primary/25 transition-transform group-hover:scale-105">
                   <Video className="h-[18px] w-[18px]" />
                 </span>
-                <span className="text-[15px] sm:text-base">
-                  Meshasec <span className="text-primary">Connect</span>
+                {/* Shortened to just "Connect" on phones. The full wordmark plus
+                    the signed-in control cluster does not fit in the ~343px a
+                    375px screen leaves, and `truncate` keeps it from forcing the
+                    header wider than the viewport if an estimate is ever off. */}
+                <span className="truncate text-[15px] sm:text-base">
+                  <span className="hidden sm:inline">Meshasec </span>
+                  <span className="text-primary">Connect</span>
                 </span>
               </Link>
 
               <MarketingNav />
 
-              <div className="flex items-center gap-1.5 sm:gap-2.5">
-                <SignedIn>
-                  <PushToggle />
-                </SignedIn>
-                <ThemeToggle />
+              <div className="flex shrink-0 items-center gap-1.5 sm:gap-2.5">
+                {/* Below `sm` these move into `MobileMenu`; six controls in a row
+                    overflow a phone header. */}
+                <div className="hidden items-center gap-2.5 sm:flex">
+                  <SignedIn>
+                    <PushToggle />
+                  </SignedIn>
+                  <ThemeToggle />
+                </div>
                 <HeaderAuthControls
                   signedInSlot={
                     <>
@@ -118,6 +151,7 @@ export default function RootLayout({
                     </>
                   }
                 />
+                <MobileMenu />
               </div>
             </div>
           </header>

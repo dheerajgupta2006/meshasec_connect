@@ -357,8 +357,18 @@ export function ControlDock({
             event.stopPropagation();
           }
         }}
-        className="pointer-events-auto flex max-w-full items-center gap-1.5 overflow-x-auto rounded-2xl border border-white/10 bg-zinc-900/70 p-1.5 shadow-2xl backdrop-blur-xl sm:gap-2 sm:rounded-full sm:p-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className="pointer-events-auto flex max-w-full items-center gap-1.5 rounded-2xl border border-white/10 bg-zinc-900/70 p-1.5 shadow-2xl backdrop-blur-xl sm:gap-2 sm:rounded-full sm:p-2"
       >
+        {/* Only the tool buttons scroll. Twelve 44px targets plus gaps want
+            ~610px and a 375px phone offers ~360px, so on mobile this row is
+            swiped. Leave used to be its last child, which meant hanging up
+            required discovering the horizontal scroll first — it now sits
+            outside the scroller, pinned and always reachable. */}
+        {/* `-my-1 py-1` because a box with `overflow-x: auto` clips vertically
+            too (CSS resolves the other axis away from `visible`), and the chat
+            unread badge hangs 2px above its button. The negative margin cancels
+            the padding so the pill keeps its original height. */}
+        <div className="-my-1 flex min-w-0 items-center gap-1.5 overflow-x-auto py-1 sm:gap-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <DockButton
           label={isMicrophoneEnabled ? "Mute microphone" : "Unmute microphone"}
           hint="M · hold Space to talk"
@@ -500,6 +510,8 @@ export function ControlDock({
             )
           }
         />
+
+        </div>
 
         <span aria-hidden="true" className="mx-0.5 h-8 w-px shrink-0 bg-white/10" />
 
