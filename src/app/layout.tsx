@@ -7,6 +7,7 @@ import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import Link from "next/link";
 
+import { UmamiAnalytics } from "@/components/analytics/umami-analytics";
 import { HeaderAuthControls } from "@/components/auth/header-auth-controls";
 import { IncomingCallBanner } from "@/components/calls/incoming-call-banner";
 import { NotificationsMenu } from "@/components/connections/notifications-menu";
@@ -184,6 +185,9 @@ export default function RootLayout({
               not tear the call down. */}
           <CallProvider>{children}</CallProvider>
           <Toaster />
+          {/* Outside `SignedIn`: anonymous landing-page traffic is the whole
+              point. Renders nothing until the Umami env vars are set. */}
+          <UmamiAnalytics />
           </ThemeProvider>
         </body>
       </html>
