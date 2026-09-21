@@ -421,6 +421,39 @@ describe("events", () => {
     expect(started).toEqual(["alice"]);
   });
 
+  it("still speaks when the start callback throws", () => {
+    // The consumer's callback reaches into LiveKit to duck the speaker. A throw
+    // there previously escaped before `speak` was reached, producing total
+    // silence from a fault that had nothing to do with synthesis.
+    const fake = harness();
+    const controller = controllerFor(fake);
+
+    controller.setEvents({
+      onStart: () => {
+        throw new Error("participant vanished");
+      },
+    });
+    controller.enqueue("hello", "ta", "alice");
+
+    expect(fake.spoken.map((item) => item.text)).toEqual(["hello"]);
+  });
+
+  it("keeps draining when the idle callback throws", () => {
+    const fake = harness();
+    const controller = controllerFor(fake);
+
+    controller.setEvents({
+      onIdle: () => {
+        throw new Error("restore failed");
+      },
+    });
+    controller.enqueue("first", "ta", "alice");
+    controller.enqueue("second", "ta", "alice");
+
+    expect(() => fake.finishCurrent()).not.toThrow();
+    expect(fake.spoken.map((item) => item.text)).toEqual(["first", "second"]);
+  });
+
   it("reports idle when the queue drains, so ducking can be released", () => {
     const fake = harness();
     const controller = controllerFor(fake);

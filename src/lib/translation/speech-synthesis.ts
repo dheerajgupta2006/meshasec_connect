@@ -257,7 +257,7 @@ export function createSpeechController(
     const next = queue.shift();
 
     if (next === undefined) {
-      events.onIdle?.();
+      notifyIdle();
       return;
     }
 
@@ -292,13 +292,31 @@ export function createSpeechController(
     utterance.onerror = finish;
 
     active = true;
-    events.onStart?.(next.speaker);
+
+    // Guarded, and before nothing important: the consumer's callback reaches into
+    // LiveKit to duck the speaker, and a throw there previously escaped `drain`
+    // before `speak` was ever reached — producing total silence from a fault that
+    // had nothing to do with synthesis.
+    try {
+      events.onStart?.(next.speaker);
+    } catch {
+      // Ducking is a nicety; speaking is the point.
+    }
 
     try {
       synthesis.speak(utterance);
     } catch {
       active = false;
       drain();
+    }
+  }
+
+  /** Notifies idle without letting a consumer's throw break the queue. */
+  function notifyIdle(): void {
+    try {
+      events.onIdle?.();
+    } catch {
+      // Same reasoning as `onStart`.
     }
   }
 
@@ -378,7 +396,7 @@ export function createSpeechController(
         // Nothing to cancel.
       }
 
-      events.onIdle?.();
+      notifyIdle();
     },
 
     setEvents(next: SpeechEvents): void {

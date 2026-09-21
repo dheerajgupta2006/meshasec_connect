@@ -748,6 +748,17 @@ export function CaptionsProvider({
   /** Segment ids already spoken, so a re-render never repeats an utterance. */
   const spokenIdsRef = React.useRef<Set<string>>(new Set<string>());
 
+  /**
+   * Forgets what has been spoken when the listen language changes.
+   *
+   * Declared *before* the speaking effect on purpose. Effects run in declaration
+   * order, so with this second it wiped the ids the speaking effect had just
+   * recorded, and the next render spoke the whole backlog again.
+   */
+  React.useEffect(() => {
+    spokenIdsRef.current = new Set<string>();
+  }, [listenLanguage]);
+
   const entriesForSpeech = React.useMemo(() => {
     if (listenLanguage === null) {
       return [];
@@ -803,11 +814,6 @@ export function CaptionsProvider({
       speech.enqueue(translation.translated, listenLanguage, segment.speaker);
     });
   }, [entriesForSpeech, translations, listenLanguage]);
-
-  // Switching listen language must not replay the whole call in the new one.
-  React.useEffect(() => {
-    spokenIdsRef.current = new Set<string>();
-  }, [listenLanguage]);
 
   const entries = React.useMemo<readonly CaptionEntry[]>(() => {
     return segments.map((segment) => {
