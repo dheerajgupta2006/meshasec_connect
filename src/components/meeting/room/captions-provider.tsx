@@ -94,15 +94,24 @@ const TRANSLATE_DEBOUNCE_MS = 250;
 const SPEAK_STORAGE_KEY = "meeting:speakIn";
 const READ_STORAGE_KEY = "meeting:readIn";
 const LISTEN_STORAGE_KEY = "meeting:listenIn";
+const MUTE_ORIGINAL_STORAGE_KEY = "meeting:muteOriginal";
 
 /**
- * How far the original voice drops while a translation is spoken over it.
+ * How far the original drops while a translation plays over it.
  *
- * Not to zero. Hearing that the other person is still talking, and their tone
- * and when they stop, is worth keeping even when the words are unintelligible to
- * the listener.
+ * Only used by listeners who chose to keep the original audible. Not zero, so
+ * tone and turn-taking survive even when the words do not.
  */
 const DUCKED_VOLUME = 0.15;
+
+/**
+ * How recently somebody must have been captioned to count as still captioning.
+ *
+ * Used to decide whose audio to silence while dubbing. Generous enough to span
+ * a pause for breath, short enough that someone who turns captioning off becomes
+ * audible again quickly rather than staying silenced for the rest of the call.
+ */
+const ACTIVE_CAPTION_WINDOW_MS = 20_000;
 
 export interface CaptionEntry {
   segment: CaptionSegment;
@@ -161,6 +170,15 @@ interface CaptionsContextValue {
   speakableLanguages: readonly LanguageCode[];
   /** False when this browser cannot synthesise speech at all. */
   canSpeak: boolean;
+  /**
+   * Whether to silence the original voice entirely while dubbing.
+   *
+   * On by default, which is what makes this a dub rather than an echo: dubbing
+   * lands a few seconds late, so leaving the original audible means hearing the
+   * sentence in a language you do not understand and only then its translation.
+   */
+  muteOriginal: boolean;
+  setMuteOriginal: (mute: boolean) => void;
   /** True while a translation language pack is downloading. */
   isPreparing: boolean;
   /** Anyone in the room currently broadcasting captions, by identity. */
@@ -245,6 +263,7 @@ export function CaptionsProvider({
     readonly LanguageCode[]
   >([]);
   const [canSpeak, setCanSpeak] = React.useState(false);
+  const [muteOriginal, setMuteOriginalState] = React.useState(true);
   const [isPreparing, setIsPreparing] = React.useState(false);
   const [translations, setTranslations] = React.useState<
     Map<string, TranslationEntry>
@@ -266,6 +285,14 @@ export function CaptionsProvider({
   React.useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  /**
+   * Captions worth showing or speaking.
+   *
+   * Declared early because both the audio-muting effect and the translation
+   * effect depend on it.
+   */
+  const segments = React.useMemo(() => visibleSegments(state), [state]);
 
   const translationsRef = React.useRef(translations);
   React.useEffect(() => {
@@ -296,6 +323,15 @@ export function CaptionsProvider({
     setSpeakLanguageState(readStoredLanguage(SPEAK_STORAGE_KEY) ?? DEFAULT_LANGUAGE);
     setReadLanguageState(readStoredLanguage(READ_STORAGE_KEY));
     setListenLanguageState(readStoredLanguage(LISTEN_STORAGE_KEY));
+
+    try {
+      // Defaults to on, so only an explicit "false" turns it off.
+      setMuteOriginalState(
+        window.localStorage.getItem(MUTE_ORIGINAL_STORAGE_KEY) !== "false",
+      );
+    } catch {
+      // Blocked store. The default stands.
+    }
 
     return () => {
       controller.stop();
@@ -518,51 +554,102 @@ export function CaptionsProvider({
   );
 
   /**
-   * Identity whose audio is currently ducked, so it can be restored.
+   * Identities currently turned down, and what to restore them to.
    *
-   * Held in a ref rather than state: the restore happens from a synthesis
-   * callback, which must not depend on a re-render having landed first.
+   * A ref rather than state because the restore has to be able to run from a
+   * cleanup or a synthesis callback, neither of which can wait for a re-render.
    */
-  const duckedRef = React.useRef<string | null>(null);
+  const loweredRef = React.useRef<Set<string>>(new Set<string>());
 
-  const restoreVolume = React.useCallback(() => {
-    const identity = duckedRef.current;
+  const setParticipantVolume = React.useCallback(
+    (identity: string, volume: number) => {
+      const participant = room.remoteParticipants.get(identity);
 
-    if (identity === null) {
+      // A participant who has left, or whose track has gone, is not an error —
+      // there is simply nothing left to adjust.
+      participant?.setVolume(volume);
+    },
+    [room],
+  );
+
+  const restoreAll = React.useCallback(() => {
+    // `forEach` rather than `for...of`: this project's tsconfig declares no
+    // `target`, so Set iteration is rejected under the default ES5 check.
+    loweredRef.current.forEach((identity) => {
+      setParticipantVolume(identity, 1);
+    });
+
+    loweredRef.current = new Set<string>();
+  }, [setParticipantVolume]);
+
+  /**
+   * Silences the people whose speech is being dubbed for this listener.
+   *
+   * Continuous rather than only while an utterance plays. Dubbing lands a few
+   * seconds behind the speaker, so ducking just for the utterance left the
+   * original audible in the gap — you heard the sentence in a language you do not
+   * read, and only then its translation. Muting for as long as dubbing is on is
+   * what makes it feel like a dub rather than an echo.
+   *
+   * Scoped to *active captioners* rather than everyone: a participant who is not
+   * captioning produces nothing to dub, so muting them would make them simply
+   * inaudible.
+   */
+  React.useEffect(() => {
+    if (listenLanguage === null || !muteOriginal) {
+      restoreAll();
       return;
     }
 
-    duckedRef.current = null;
+    const shouldLower = new Set<string>();
 
-    const participant = room.remoteParticipants.get(identity);
-
-    // `setVolume` is a no-op when the track has gone, and the participant may
-    // have left mid-utterance, so a missing one is not an error.
-    participant?.setVolume(1);
-  }, [room]);
-
-  const duckVolume = React.useCallback(
-    (identity: string) => {
-      if (duckedRef.current === identity) {
+    segments.forEach((segment) => {
+      if (segment.speaker === localIdentity) {
         return;
       }
 
-      restoreVolume();
-
-      const participant = room.remoteParticipants.get(identity);
-
-      if (participant === undefined) {
-        return;
+      // Recency, so someone who stops captioning becomes audible again on their
+      // own rather than staying silenced for the rest of the call.
+      if (Date.now() - segment.updatedAt <= ACTIVE_CAPTION_WINDOW_MS) {
+        shouldLower.add(segment.speaker);
       }
+    });
 
-      duckedRef.current = identity;
-      participant.setVolume(DUCKED_VOLUME);
-    },
-    [room, restoreVolume],
-  );
+    shouldLower.forEach((identity) => {
+      if (!loweredRef.current.has(identity)) {
+        setParticipantVolume(identity, 0);
+      }
+    });
 
-  // Registered as a pair: a started utterance ducks its speaker, and draining
-  // the queue restores them.
+    loweredRef.current.forEach((identity) => {
+      if (!shouldLower.has(identity)) {
+        setParticipantVolume(identity, 1);
+      }
+    });
+
+    loweredRef.current = shouldLower;
+  }, [
+    listenLanguage,
+    muteOriginal,
+    segments,
+    localIdentity,
+    setParticipantVolume,
+    restoreAll,
+  ]);
+
+  // Leaving the room, or unmounting, must never strand somebody on mute.
+  React.useEffect(() => restoreAll, [restoreAll]);
+
+  /** Identity dipped for the duration of one utterance, tracked separately from
+   * the continuous mute so the two cannot clobber each other's restore. */
+  const dippedRef = React.useRef<string | null>(null);
+
+  /**
+   * Dips the original while an utterance plays, for listeners who chose to keep
+   * it audible.
+   *
+   * Nothing to do when `muteOriginal` is on: it is already silent.
+   */
   React.useEffect(() => {
     const speech = speechRef.current;
 
@@ -570,13 +657,35 @@ export function CaptionsProvider({
       return;
     }
 
-    speech.setEvents({ onStart: duckVolume, onIdle: restoreVolume });
+    const releaseDip = (): void => {
+      const identity = dippedRef.current;
+
+      if (identity !== null) {
+        dippedRef.current = null;
+        setParticipantVolume(identity, 1);
+      }
+    };
+
+    if (listenLanguage === null || muteOriginal) {
+      speech.setEvents({});
+      releaseDip();
+      return;
+    }
+
+    speech.setEvents({
+      onStart: (identity) => {
+        releaseDip();
+        dippedRef.current = identity;
+        setParticipantVolume(identity, DUCKED_VOLUME);
+      },
+      onIdle: releaseDip,
+    });
 
     return () => {
       speech.setEvents({});
-      restoreVolume();
+      releaseDip();
     };
-  }, [duckVolume, restoreVolume]);
+  }, [listenLanguage, muteOriginal, setParticipantVolume]);
 
   const setListenLanguage = React.useCallback(
     (language: LanguageCode | null) => {
@@ -584,16 +693,28 @@ export function CaptionsProvider({
       writeStoredLanguage(LISTEN_STORAGE_KEY, language);
 
       // Turning it off must silence what is already queued, not let the backlog
-      // play out after the user asked for quiet.
+      // play out after the user asked for quiet, and must hand everyone their
+      // real voice back.
       if (language === null) {
         speechRef.current?.stop();
-        restoreVolume();
+        restoreAll();
       }
     },
-    [restoreVolume],
+    [restoreAll],
   );
 
-  const segments = React.useMemo(() => visibleSegments(state), [state]);
+  const setMuteOriginal = React.useCallback((mute: boolean) => {
+    setMuteOriginalState(mute);
+
+    try {
+      window.localStorage.setItem(
+        MUTE_ORIGINAL_STORAGE_KEY,
+        mute ? "true" : "false",
+      );
+    } catch {
+      // A failed write only costs the preference on reload.
+    }
+  }, []);
 
   /**
    * Every language translations are currently needed in.
@@ -869,6 +990,8 @@ export function CaptionsProvider({
       setListenLanguage,
       speakableLanguages,
       canSpeak,
+      muteOriginal,
+      setMuteOriginal,
       isPreparing,
       activeSpeakers,
     }),
@@ -889,6 +1012,8 @@ export function CaptionsProvider({
       setListenLanguage,
       speakableLanguages,
       canSpeak,
+      muteOriginal,
+      setMuteOriginal,
       isPreparing,
       activeSpeakers,
     ],

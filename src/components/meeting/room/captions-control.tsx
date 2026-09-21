@@ -68,6 +68,8 @@ export function CaptionsPanel() {
     listenLanguage,
     setListenLanguage,
     speakableLanguages,
+    muteOriginal,
+    setMuteOriginal,
     isPreparing,
   } = useCaptions();
 
@@ -166,10 +168,29 @@ export function CaptionsPanel() {
         )}
 
         {listenLanguage !== null && (
-          <p className="text-[11px] leading-4 text-zinc-400">
-            Spoken a few seconds behind the speaker, and their voice is quietened
-            while it plays.
-          </p>
+          <>
+            <label className="flex cursor-pointer items-start gap-2 text-[11px] leading-4 text-zinc-300">
+              <input
+                type="checkbox"
+                checked={muteOriginal}
+                onChange={(event) => setMuteOriginal(event.target.checked)}
+                className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-emerald-500"
+              />
+              <span>
+                Mute the original voice
+                <span className="mt-0.5 block text-zinc-400">
+                  {muteOriginal
+                    ? "You hear only the translation."
+                    : "You hear both, with the original quietened while the translation plays."}
+                </span>
+              </span>
+            </label>
+
+            <p className="text-[11px] leading-4 text-zinc-400">
+              The translation arrives a few seconds after each sentence finishes,
+              so expect a pause before you hear it.
+            </p>
+          </>
         )}
       </section>
 
