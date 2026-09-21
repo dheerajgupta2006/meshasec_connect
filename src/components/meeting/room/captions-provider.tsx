@@ -58,6 +58,10 @@ import {
   type DictationState,
 } from "@/lib/translation/speech-recognition";
 import {
+  createSpeechController,
+  type SpeechController,
+} from "@/lib/translation/speech-synthesis";
+import {
   createTranslationEngine,
   type TranslationEngine,
 } from "@/lib/translation/on-device";
@@ -89,6 +93,16 @@ const TRANSLATE_DEBOUNCE_MS = 250;
 /** Persisted across meetings: a person's languages rarely change per call. */
 const SPEAK_STORAGE_KEY = "meeting:speakIn";
 const READ_STORAGE_KEY = "meeting:readIn";
+const LISTEN_STORAGE_KEY = "meeting:listenIn";
+
+/**
+ * How far the original voice drops while a translation is spoken over it.
+ *
+ * Not to zero. Hearing that the other person is still talking, and their tone
+ * and when they stop, is worth keeping even when the words are unintelligible to
+ * the listener.
+ */
+const DUCKED_VOLUME = 0.15;
 
 export interface CaptionEntry {
   segment: CaptionSegment;
@@ -128,6 +142,25 @@ interface CaptionsContextValue {
   /** The language the local participant reads. Null shows originals only. */
   readLanguage: LanguageCode | null;
   setReadLanguage: (language: LanguageCode | null) => void;
+  /**
+   * The language the local participant wants spoken aloud, or null for silence.
+   *
+   * Independent of `readLanguage`: someone may want both, and someone who cannot
+   * read wants only this.
+   */
+  listenLanguage: LanguageCode | null;
+  setListenLanguage: (language: LanguageCode | null) => void;
+  /**
+   * Catalogue languages this device actually has a voice for.
+   *
+   * The list the listen picker must be built from. Voices come from the operating
+   * system, so this is frequently a small subset — Indic voices beyond Hindi are
+   * often absent on Windows — and offering a language with no voice would fail
+   * silently.
+   */
+  speakableLanguages: readonly LanguageCode[];
+  /** False when this browser cannot synthesise speech at all. */
+  canSpeak: boolean;
   /** True while a translation language pack is downloading. */
   isPreparing: boolean;
   /** Anyone in the room currently broadcasting captions, by identity. */
@@ -169,6 +202,17 @@ function writeStoredLanguage(key: string, value: LanguageCode | null): void {
   }
 }
 
+/**
+ * Keys a translation by segment *and* target language.
+ *
+ * Both are needed because reading and listening can be set to different
+ * languages, and keying on the segment alone meant whichever was translated first
+ * won and the other was never served.
+ */
+function translationKey(segmentId: string, target: LanguageCode): string {
+  return `${segmentId}\u0000${target}`;
+}
+
 /** What a translation was produced from, so staleness is detectable. */
 interface TranslationEntry {
   text: string;
@@ -195,6 +239,12 @@ export function CaptionsProvider({
     React.useState<LanguageCode>(DEFAULT_LANGUAGE);
   const [readLanguage, setReadLanguageState] =
     React.useState<LanguageCode | null>(null);
+  const [listenLanguage, setListenLanguageState] =
+    React.useState<LanguageCode | null>(null);
+  const [speakableLanguages, setSpeakableLanguages] = React.useState<
+    readonly LanguageCode[]
+  >([]);
+  const [canSpeak, setCanSpeak] = React.useState(false);
   const [isPreparing, setIsPreparing] = React.useState(false);
   const [translations, setTranslations] = React.useState<
     Map<string, TranslationEntry>
@@ -209,6 +259,7 @@ export function CaptionsProvider({
    */
   const [engine, setEngine] = React.useState<TranslationEngine | null>(null);
   const dictationRef = React.useRef<DictationController | null>(null);
+  const speechRef = React.useRef<SpeechController | null>(null);
   const [canCaption, setCanCaption] = React.useState(false);
 
   const stateRef = React.useRef(state);
@@ -231,12 +282,27 @@ export function CaptionsProvider({
     dictationRef.current = controller;
     setCanCaption(controller.isSupported());
 
+    const speech = createSpeechController();
+    speechRef.current = speech;
+    setCanSpeak(speech.isSupported());
+    setSpeakableLanguages(speech.speakableLanguages());
+
+    // Chrome returns an empty voice list on first call and fills it in later, so
+    // the picker has to be rebuilt when that happens or it stays empty forever.
+    const unsubscribe = speech.onVoicesReady(() => {
+      setSpeakableLanguages(speech.speakableLanguages());
+    });
+
     setSpeakLanguageState(readStoredLanguage(SPEAK_STORAGE_KEY) ?? DEFAULT_LANGUAGE);
     setReadLanguageState(readStoredLanguage(READ_STORAGE_KEY));
+    setListenLanguageState(readStoredLanguage(LISTEN_STORAGE_KEY));
 
     return () => {
       controller.stop();
       dictationRef.current = null;
+      unsubscribe();
+      speech.stop();
+      speechRef.current = null;
     };
   }, []);
 
@@ -451,7 +517,106 @@ export function CaptionsProvider({
     [],
   );
 
+  /**
+   * Identity whose audio is currently ducked, so it can be restored.
+   *
+   * Held in a ref rather than state: the restore happens from a synthesis
+   * callback, which must not depend on a re-render having landed first.
+   */
+  const duckedRef = React.useRef<string | null>(null);
+
+  const restoreVolume = React.useCallback(() => {
+    const identity = duckedRef.current;
+
+    if (identity === null) {
+      return;
+    }
+
+    duckedRef.current = null;
+
+    const participant = room.remoteParticipants.get(identity);
+
+    // `setVolume` is a no-op when the track has gone, and the participant may
+    // have left mid-utterance, so a missing one is not an error.
+    participant?.setVolume(1);
+  }, [room]);
+
+  const duckVolume = React.useCallback(
+    (identity: string) => {
+      if (duckedRef.current === identity) {
+        return;
+      }
+
+      restoreVolume();
+
+      const participant = room.remoteParticipants.get(identity);
+
+      if (participant === undefined) {
+        return;
+      }
+
+      duckedRef.current = identity;
+      participant.setVolume(DUCKED_VOLUME);
+    },
+    [room, restoreVolume],
+  );
+
+  // Registered as a pair: a started utterance ducks its speaker, and draining
+  // the queue restores them.
+  React.useEffect(() => {
+    const speech = speechRef.current;
+
+    if (speech === null) {
+      return;
+    }
+
+    speech.setEvents({ onStart: duckVolume, onIdle: restoreVolume });
+
+    return () => {
+      speech.setEvents({});
+      restoreVolume();
+    };
+  }, [duckVolume, restoreVolume]);
+
+  const setListenLanguage = React.useCallback(
+    (language: LanguageCode | null) => {
+      setListenLanguageState(language);
+      writeStoredLanguage(LISTEN_STORAGE_KEY, language);
+
+      // Turning it off must silence what is already queued, not let the backlog
+      // play out after the user asked for quiet.
+      if (language === null) {
+        speechRef.current?.stop();
+        restoreVolume();
+      }
+    },
+    [restoreVolume],
+  );
+
   const segments = React.useMemo(() => visibleSegments(state), [state]);
+
+  /**
+   * Every language translations are currently needed in.
+   *
+   * Usually one. Two when somebody reads in one language and listens in another,
+   * which is unusual but has to work rather than silently serving only the first.
+   */
+  const translationTargets = React.useMemo(() => {
+    const targets: LanguageCode[] = [];
+
+    if (readLanguage !== null) {
+      targets.push(readLanguage);
+    }
+
+    if (listenLanguage !== null && listenLanguage !== readLanguage) {
+      targets.push(listenLanguage);
+    }
+
+    return targets;
+  }, [readLanguage, listenLanguage]);
+
+  /** Stable across renders, so the translation effect is not restarted needlessly. */
+  const targetsSignature = translationTargets.join("|");
 
   /**
    * Translates what is on screen into the reader's language.
@@ -461,103 +626,112 @@ export function CaptionsProvider({
    * in-progress speech from starving finished sentences.
    */
   React.useEffect(() => {
-    if (engine === null || !engine.isSupported() || readLanguage === null) {
+    if (engine === null || !engine.isSupported()) {
+      return;
+    }
+
+    const targets = translationTargets;
+
+    if (targets.length === 0) {
       return;
     }
 
     let cancelled = false;
-    const target = readLanguage;
     const activeEngine = engine;
 
     const timer = window.setTimeout(() => {
       void (async () => {
-        const pending = segments.filter((segment) => {
-          if (segment.sourceLanguage === target) {
-            return false;
-          }
-
-          const existing = translationsRef.current.get(segment.id);
-
-          return (
-            existing === undefined ||
-            existing.text !== segment.text ||
-            existing.target !== target
-          );
-        });
-
-        if (pending.length === 0) {
-          return;
-        }
-
-        // Distinct directions actually needed, so a first run downloads only the
-        // packs in use rather than every pair in the catalog.
-        const sources: LanguageCode[] = [];
-
-        pending.forEach((segment) => {
-          if (!sources.includes(segment.sourceLanguage)) {
-            sources.push(segment.sourceLanguage);
-          }
-        });
-
-        for (const source of sources) {
+        for (const target of targets) {
           if (cancelled) {
             return;
           }
 
-          const pair = { source, target };
-          const availability = await activeEngine.availability(pair);
+          const pending = segments.filter((segment) => {
+            if (segment.sourceLanguage === target) {
+              return false;
+            }
 
-          if (cancelled) {
-            return;
-          }
+            const existing = translationsRef.current.get(
+              translationKey(segment.id, target),
+            );
 
-          if (availability === "unavailable") {
-            continue;
-          }
-
-          if (availability !== "available") {
-            setIsPreparing(true);
-          }
-
-          await activeEngine.prepare(pair);
-
-          if (cancelled) {
-            return;
-          }
-        }
-
-        setIsPreparing(false);
-
-        for (const segment of pending) {
-          if (cancelled) {
-            return;
-          }
-
-          const outcome = await activeEngine.translate(segment.text, {
-            source: segment.sourceLanguage,
-            target,
+            return existing === undefined || existing.text !== segment.text;
           });
 
-          if (cancelled || !outcome.ok) {
+          if (pending.length === 0) {
             continue;
           }
 
-          const translated = outcome.text;
-          const { viaPivot } = outcome;
+          // Distinct directions actually needed, so a first run downloads only
+          // the packs in use rather than every pair in the catalog.
+          const sources: LanguageCode[] = [];
 
-          setTranslations((current) => {
-            const next = new Map(current);
+          pending.forEach((segment) => {
+            if (!sources.includes(segment.sourceLanguage)) {
+              sources.push(segment.sourceLanguage);
+            }
+          });
 
-            next.set(segment.id, {
-              text: segment.text,
-              sourceLanguage: segment.sourceLanguage,
+          for (const source of sources) {
+            if (cancelled) {
+              return;
+            }
+
+            const pair = { source, target };
+            const availability = await activeEngine.availability(pair);
+
+            if (cancelled) {
+              return;
+            }
+
+            if (availability === "unavailable") {
+              continue;
+            }
+
+            if (availability !== "available") {
+              setIsPreparing(true);
+            }
+
+            await activeEngine.prepare(pair);
+
+            if (cancelled) {
+              return;
+            }
+          }
+
+          setIsPreparing(false);
+
+          for (const segment of pending) {
+            if (cancelled) {
+              return;
+            }
+
+            const outcome = await activeEngine.translate(segment.text, {
+              source: segment.sourceLanguage,
               target,
-              translated,
-              viaPivot,
             });
 
-            return next;
-          });
+            if (cancelled || !outcome.ok) {
+              continue;
+            }
+
+            const translated = outcome.text;
+            const { viaPivot } = outcome;
+
+            setTranslations((current) => {
+              const next = new Map(current);
+
+              next.set(translationKey(segment.id, target), {
+                text: segment.text,
+                sourceLanguage: segment.sourceLanguage,
+                target,
+                translated,
+                viaPivot,
+              });
+
+              return next;
+            });
+          }
         }
       })();
     }, TRANSLATE_DEBOUNCE_MS);
@@ -566,18 +740,87 @@ export function CaptionsProvider({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [engine, readLanguage, segments]);
+    // `targetsSignature` stands in for `translationTargets`, a fresh array each
+    // render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engine, targetsSignature, segments]);
+
+  /** Segment ids already spoken, so a re-render never repeats an utterance. */
+  const spokenIdsRef = React.useRef<Set<string>>(new Set<string>());
+
+  const entriesForSpeech = React.useMemo(() => {
+    if (listenLanguage === null) {
+      return [];
+    }
+
+    return segments.filter((segment) => {
+      // Interim text is revised on almost every syllable, so speaking it would
+      // stutter and repeat. Only a committed sentence is worth saying aloud.
+      if (!segment.isFinal) {
+        return false;
+      }
+
+      // Never read the listener their own words back.
+      if (segment.speaker === localIdentity) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [segments, listenLanguage, localIdentity]);
+
+  React.useEffect(() => {
+    const speech = speechRef.current;
+
+    if (speech === null || listenLanguage === null) {
+      return;
+    }
+
+    entriesForSpeech.forEach((segment) => {
+      if (spokenIdsRef.current.has(segment.id)) {
+        return;
+      }
+
+      // Already in the listener's language: speak the original rather than
+      // waiting on a translation that will never come.
+      if (segment.sourceLanguage === listenLanguage) {
+        spokenIdsRef.current.add(segment.id);
+        speech.enqueue(segment.text, listenLanguage, segment.speaker);
+        return;
+      }
+
+      const translation = translations.get(
+        translationKey(segment.id, listenLanguage),
+      );
+
+      // Not translated yet. Left unmarked so the next pass picks it up once the
+      // translation lands.
+      if (translation === undefined || translation.text !== segment.text) {
+        return;
+      }
+
+      spokenIdsRef.current.add(segment.id);
+      speech.enqueue(translation.translated, listenLanguage, segment.speaker);
+    });
+  }, [entriesForSpeech, translations, listenLanguage]);
+
+  // Switching listen language must not replay the whole call in the new one.
+  React.useEffect(() => {
+    spokenIdsRef.current = new Set<string>();
+  }, [listenLanguage]);
 
   const entries = React.useMemo<readonly CaptionEntry[]>(() => {
     return segments.map((segment) => {
-      const entry = translations.get(segment.id);
+      const entry =
+        readLanguage === null
+          ? undefined
+          : translations.get(translationKey(segment.id, readLanguage));
 
-      // Only a translation produced from this exact text, into the language
-      // currently selected, is safe to show. Anything else would be mislabelled.
+      // Only a translation produced from this exact text is safe to show; the
+      // key already guarantees it is in the language currently selected.
       const fresh =
         entry !== undefined &&
         entry.text === segment.text &&
-        entry.target === readLanguage &&
         readLanguage !== null &&
         segment.sourceLanguage !== readLanguage;
 
@@ -616,6 +859,10 @@ export function CaptionsProvider({
       setSpeakLanguage,
       readLanguage,
       setReadLanguage,
+      listenLanguage,
+      setListenLanguage,
+      speakableLanguages,
+      canSpeak,
       isPreparing,
       activeSpeakers,
     }),
@@ -632,6 +879,10 @@ export function CaptionsProvider({
       setSpeakLanguage,
       readLanguage,
       setReadLanguage,
+      listenLanguage,
+      setListenLanguage,
+      speakableLanguages,
+      canSpeak,
       isPreparing,
       activeSpeakers,
     ],

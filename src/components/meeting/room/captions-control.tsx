@@ -55,6 +55,7 @@ export function CaptionsPanel() {
   const {
     canCaption,
     canTranslate,
+    canSpeak,
     isCaptioning,
     dictationState,
     failure,
@@ -64,6 +65,9 @@ export function CaptionsPanel() {
     setSpeakLanguage,
     readLanguage,
     setReadLanguage,
+    listenLanguage,
+    setListenLanguage,
+    speakableLanguages,
     isPreparing,
   } = useCaptions();
 
@@ -114,6 +118,57 @@ export function CaptionsPanel() {
           <p className="flex items-center gap-1.5 text-[11px] text-zinc-400">
             <LoaderCircle className="h-3 w-3 animate-spin" aria-hidden />
             Downloading a language pack
+          </p>
+        )}
+      </section>
+
+      <div aria-hidden className="h-px bg-white/10" />
+
+      <section className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+          Read aloud to me in
+        </h3>
+
+        {canSpeak && speakableLanguages.length > 0 ? (
+          <Select
+            value={listenLanguage ?? OFF}
+            onValueChange={(value) => {
+              setListenLanguage(value === OFF ? null : (value as LanguageCode));
+            }}
+          >
+            <SelectTrigger
+              className="h-9 border-white/15 bg-white/5 text-xs text-zinc-100"
+              aria-label="Language to speak translations aloud in"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="max-h-72">
+              <SelectItem value={OFF} className="text-xs">
+                Don&apos;t read aloud
+              </SelectItem>
+              {/* Built from the voices this device actually has, not from the
+                  catalogue. Offering a language with no installed voice would
+                  fail silently, which is the worst possible outcome for someone
+                  relying on audio because they cannot read the text. */}
+              {speakableLanguages.map((code) => (
+                <SelectItem key={code} value={code} className="text-xs">
+                  {languageLabel(code)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <p className="text-[11px] leading-4 text-zinc-400">
+            {canSpeak
+              ? "No speech voices are installed on this device. Add a language with text-to-speech in your system settings to hear translations spoken."
+              : "This browser cannot speak text aloud."}
+          </p>
+        )}
+
+        {listenLanguage !== null && (
+          <p className="text-[11px] leading-4 text-zinc-400">
+            Spoken a few seconds behind the speaker, and their voice is quietened
+            while it plays.
           </p>
         )}
       </section>
@@ -197,7 +252,7 @@ export function CaptionsPanel() {
 
 /** Whether the dock button should read as active. */
 export function useCaptionsActive(): boolean {
-  const { isCaptioning, readLanguage } = useCaptions();
+  const { isCaptioning, readLanguage, listenLanguage } = useCaptions();
 
-  return isCaptioning || readLanguage !== null;
+  return isCaptioning || readLanguage !== null || listenLanguage !== null;
 }
