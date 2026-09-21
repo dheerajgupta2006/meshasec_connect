@@ -641,7 +641,7 @@ export function MessageThread({
                 ref={(node) => {
                   registerNode(message.id, node);
                 }}
-                className={`group flex scroll-mt-6 flex-col ${
+                className={`group relative flex scroll-mt-6 flex-col ${
                   message.outgoing ? "items-end" : "items-start"
                 }`}
               >
@@ -799,10 +799,24 @@ export function MessageThread({
 
                 {!isEditing && !message.deleted && (
                   <div
-                    className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
-                    // Hidden actions must not be clickable while invisible, but
-                    // Tab still reaches them, which is what reveals them.
-                    style={{ pointerEvents: "auto" }}
+                    // Absolute, not in flow. In flow at `opacity-0` this still
+                    // occupied ~32px under every single message, which is what
+                    // put a bubble-sized gap between every pair of messages. It
+                    // now floats over the 12px `space-y-3` gap and costs no
+                    // layout height at all.
+                    //
+                    // `pointer-events-none` while hidden because an invisible
+                    // row of buttons was still clickable: a click in the gap
+                    // below a message could fire Reply, Edit or Delete. Keyboard
+                    // focus is unaffected by it, so Tab still reaches the buttons
+                    // and `focus-within` is what reveals them.
+                    //
+                    // Pinned to the message's own side so the "Delete?" confirm
+                    // expands inward. Expanding outward would overflow the log,
+                    // which scrolls on both axes once `overflow-y` is set.
+                    className={`pointer-events-none absolute -bottom-3 z-10 flex items-center gap-0.5 rounded-full border bg-card px-1 py-0.5 opacity-0 shadow-sm transition-opacity focus-within:pointer-events-auto focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 ${
+                      message.outgoing ? "right-0" : "left-0"
+                    }`}
                   >
                     <Button
                       type="button"

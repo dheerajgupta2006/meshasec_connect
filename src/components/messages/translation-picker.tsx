@@ -8,7 +8,7 @@
  * reader cannot act on, so an explanation would be noise.
  */
 
-import { Languages, LoaderCircle } from "lucide-react";
+import { Languages, LoaderCircle, TriangleAlert } from "lucide-react";
 
 import {
   SUPPORTED_LANGUAGES,
@@ -45,10 +45,27 @@ export function TranslationPicker({
   }
 
   const isPreparing = status === "preparing";
+  // Only meaningful once a language has been chosen: "off" plus "unavailable"
+  // would be reporting a failure nobody asked for.
+  const isUnavailable = status === "unavailable" && target !== null;
 
   return (
-    <div className="flex items-center gap-1.5">
-      {isPreparing ? (
+    <div
+      // `shrink-0` because the sibling name block is `flex-1` and would otherwise
+      // squeeze this control down toward its content width.
+      className="flex shrink-0 items-center gap-1.5"
+      title={
+        isUnavailable
+          ? "This browser cannot translate this conversation's languages."
+          : undefined
+      }
+    >
+      {isUnavailable ? (
+        <TriangleAlert
+          className="h-4 w-4 shrink-0 text-destructive-text"
+          aria-hidden
+        />
+      ) : isPreparing ? (
         <LoaderCircle
           className="h-4 w-4 shrink-0 animate-spin text-muted-foreground"
           aria-hidden
@@ -60,6 +77,13 @@ export function TranslationPicker({
         />
       )}
 
+      {/* Mirrors the composer's "Send in" so the pair reads as one feature.
+          Hidden on narrow screens, where the header has no room to spare — the
+          select keeps its `aria-label` either way. */}
+      <span className="hidden shrink-0 text-xs text-muted-foreground sm:inline">
+        Read in
+      </span>
+
       <Select
         value={target ?? OFF}
         onValueChange={(value) => {
@@ -69,11 +93,16 @@ export function TranslationPicker({
           onChange(value === OFF ? null : (value as LanguageCode));
         }}
       >
+        {/* Deliberately the default bordered trigger. Borderless and transparent,
+            this read as decoration rather than a control and the selected value
+            was easy to miss entirely. */}
         <SelectTrigger
-          className="h-8 w-[136px] border-none bg-transparent px-2 text-xs shadow-none focus:ring-1"
-          aria-label="Translate this conversation"
+          className="h-8 w-[132px] shrink-0 px-2 text-xs"
+          aria-label="Read this conversation in"
         >
-          <SelectValue />
+          {/* The placeholder only appears if `target` ever holds a code this
+              build does not know, which a stale stored preference could do. */}
+          <SelectValue placeholder="No translation" />
         </SelectTrigger>
         <SelectContent>
           <SelectItem value={OFF} className="text-xs">

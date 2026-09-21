@@ -57,11 +57,14 @@ export function ComposerTranslationBar({
             setTarget(value === OFF ? null : (value as LanguageCode));
           }}
         >
+          {/* Same reasoning as the reader's picker in the header: borderless and
+              transparent, the selected language was barely legible and did not
+              read as something you could click. */}
           <SelectTrigger
-            className="h-7 w-[150px] border-none bg-transparent px-2 text-xs shadow-none focus:ring-1"
+            className="h-8 w-[150px] shrink-0 px-2 text-xs"
             aria-label="Language to send this message in"
           >
-            <SelectValue />
+            <SelectValue placeholder="My own language" />
           </SelectTrigger>
           <SelectContent className="max-h-72">
             <SelectItem value={OFF} className="text-xs">
