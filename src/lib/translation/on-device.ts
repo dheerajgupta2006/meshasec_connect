@@ -122,8 +122,28 @@ const MAX_CACHE_ENTRIES = 500;
 /** Matches the 4000-char limit `sendDirectMessage` enforces on a message body. */
 export const MAX_TRANSLATION_CHARS = 4000;
 
+/**
+ * The language every pair is routed through when no direct pair exists.
+ *
+ * Chrome does not publish which of the 600 non-English combinations it serves
+ * directly, and its page translation has always gone via English, so a pair like
+ * Telugu to Tamil may simply not exist. Rather than show such a pair nothing at
+ * all, it is translated in two hops.
+ */
+export const PIVOT_LANGUAGE = "en";
+
 export type TranslationOutcome =
-  | { ok: true; text: string }
+  | {
+      ok: true;
+      text: string;
+      /**
+       * True when the text went through a second language to get here.
+       *
+       * Worth surfacing: two translations compound their errors, so Telugu to
+       * Tamil via English is measurably worse than either hop alone.
+       */
+      viaPivot: boolean;
+    }
   /**
    * `reason` is for the UI to branch on; `detail` is for a log. Nothing here is
    * thrown, because a failed translation must never take down a message thread —
@@ -158,6 +178,12 @@ function cacheKey(pair: LanguagePair, text: string): string {
   return `${pairKey(pair)}\u0000${text}`;
 }
 
+/** How a pair is served: straight through, in two hops, or not at all. */
+type TranslationRoute =
+  | { kind: "direct" }
+  | { kind: "pivot"; via: string }
+  | { kind: "unavailable" };
+
 export function createTranslationEngine(
   factory: TranslatorFactory | null = readTranslatorFactory(),
 ): TranslationEngine {
@@ -172,6 +198,14 @@ export function createTranslationEngine(
 
   /** One translator per direction, reused across every message in that direction. */
   const translators = new Map<string, Promise<TranslatorInstance>>();
+
+  /**
+   * How each pair gets translated, resolved once and remembered.
+   *
+   * Cached because working it out costs up to three `availability` calls, and the
+   * answer cannot change within a session.
+   */
+  const routes = new Map<string, Promise<TranslationRoute>>();
 
   /**
    * Serialises work.
@@ -255,6 +289,84 @@ export function createTranslationEngine(
     return run;
   }
 
+  /** One `availability` call, with a thrown check treated as unavailable. */
+  async function rawAvailability(
+    source: string,
+    target: string,
+  ): Promise<TranslatorAvailability> {
+    if (factory === null) {
+      return "unavailable";
+    }
+
+    try {
+      return await factory.availability({
+        sourceLanguage: source,
+        targetLanguage: target,
+      });
+    } catch {
+      return "unavailable";
+    }
+  }
+
+  /**
+   * Works out how a pair can be served, preferring a direct pair.
+   *
+   * A pivot is only considered when neither end is already the pivot language:
+   * if English to Tamil is unavailable, going English to English to Tamil cannot
+   * help, and asking would just waste two more checks.
+   */
+  function resolveRoute(pair: LanguagePair): Promise<TranslationRoute> {
+    const key = pairKey(pair);
+    const existing = routes.get(key);
+
+    if (existing !== undefined) {
+      return existing;
+    }
+
+    const resolved = (async (): Promise<TranslationRoute> => {
+      if ((await rawAvailability(pair.source, pair.target)) !== "unavailable") {
+        return { kind: "direct" };
+      }
+
+      if (
+        pair.source === PIVOT_LANGUAGE ||
+        pair.target === PIVOT_LANGUAGE
+      ) {
+        return { kind: "unavailable" };
+      }
+
+      const [toPivot, fromPivot] = await Promise.all([
+        rawAvailability(pair.source, PIVOT_LANGUAGE),
+        rawAvailability(PIVOT_LANGUAGE, pair.target),
+      ]);
+
+      if (toPivot !== "unavailable" && fromPivot !== "unavailable") {
+        return { kind: "pivot", via: PIVOT_LANGUAGE };
+      }
+
+      return { kind: "unavailable" };
+    })();
+
+    routes.set(key, resolved);
+
+    return resolved;
+  }
+
+  /** The legs a route needs translating over, in order. */
+  function legsFor(
+    pair: LanguagePair,
+    route: TranslationRoute,
+  ): LanguagePair[] {
+    if (route.kind === "pivot") {
+      return [
+        { source: pair.source, target: route.via as LanguagePair["target"] },
+        { source: route.via as LanguagePair["source"], target: pair.target },
+      ];
+    }
+
+    return [pair];
+  }
+
   return {
     isSupported(): boolean {
       return factory !== null;
@@ -270,14 +382,26 @@ export function createTranslationEngine(
         return "available";
       }
 
-      try {
-        return await factory.availability({
-          sourceLanguage: pair.source,
-          targetLanguage: pair.target,
-        });
-      } catch {
+      const route = await resolveRoute(pair);
+
+      if (route.kind === "unavailable") {
         return "unavailable";
       }
+
+      if (route.kind === "direct") {
+        return rawAvailability(pair.source, pair.target);
+      }
+
+      // A pivot is only as ready as its least ready leg: if either pack still
+      // has to download, the pair as a whole does.
+      const [first, second] = await Promise.all([
+        rawAvailability(pair.source, route.via),
+        rawAvailability(route.via, pair.target),
+      ]);
+
+      return first === "available" && second === "available"
+        ? "available"
+        : "downloadable";
     },
 
     async prepare(
@@ -288,8 +412,19 @@ export function createTranslationEngine(
         return false;
       }
 
+      const route = await resolveRoute(pair);
+
+      if (route.kind === "unavailable") {
+        return false;
+      }
+
       try {
-        await getTranslator(pair, onProgress);
+        // Sequential rather than parallel: two concurrent pack downloads report
+        // interleaved progress, which reads as a bar jumping backwards.
+        for (const leg of legsFor(pair, route)) {
+          await getTranslator(leg, onProgress);
+        }
+
         return true;
       } catch {
         return false;
@@ -307,27 +442,44 @@ export function createTranslationEngine(
       // Same language, or nothing worth sending. Both are successes that happen
       // to need no work.
       if (isSamePair(pair) || text.trim().length === 0) {
-        return { ok: true, text };
+        return { ok: true, text, viaPivot: false };
       }
 
       if (text.length > MAX_TRANSLATION_CHARS) {
         return { ok: false, reason: "too_long" };
       }
 
+      const route = await resolveRoute(pair);
+
+      if (route.kind === "unavailable") {
+        return { ok: false, reason: "unavailable" };
+      }
+
+      const viaPivot = route.kind === "pivot";
       const key = cacheKey(pair, text);
       const cached = results.get(key);
 
       if (cached !== undefined) {
         try {
-          return { ok: true, text: await cached };
+          return { ok: true, text: await cached, viaPivot };
         } catch {
           // Fall through and retry: the entry was already evicted below.
         }
       }
 
+      const legs = legsFor(pair, route);
+
       const pending = enqueue(async () => {
-        const translator = await getTranslator(pair);
-        return translator.translate(text);
+        let current = text;
+
+        // One hop for a direct pair, two for a pivot. Each leg reuses its own
+        // cached translator, so a pivot costs no extra setup after the first use.
+        for (const leg of legs) {
+          const translator = await getTranslator(leg);
+          current = await translator.translate(current);
+        }
+
+        return current;
       });
 
       results.set(key, pending);
@@ -343,7 +495,7 @@ export function createTranslationEngine(
       evictOldestIfFull();
 
       try {
-        return { ok: true, text: await pending };
+        return { ok: true, text: await pending, viaPivot };
       } catch (error: unknown) {
         return {
           ok: false,
@@ -356,6 +508,7 @@ export function createTranslationEngine(
     reset(): void {
       results.clear();
       translators.clear();
+      routes.clear();
       tail = Promise.resolve();
     },
   };

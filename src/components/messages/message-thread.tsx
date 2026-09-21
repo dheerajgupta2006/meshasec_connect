@@ -30,9 +30,11 @@ import {
   markThreadRead,
   sendDirectMessage,
 } from "@/app/messages/actions";
+import { ComposerTranslationBar } from "@/components/messages/composer-translation";
 import { LinkPreviewCard } from "@/components/messages/link-preview-card";
 import { MessageBody } from "@/components/messages/message-body";
 import { TranslatedBody } from "@/components/messages/translated-body";
+import { useComposerTranslation } from "@/components/messages/use-composer-translation";
 import { TranslationPicker } from "@/components/messages/translation-picker";
 import { useThreadTranslation } from "@/components/messages/use-thread-translation";
 import { mintCreationRequestId } from "@/lib/meetings/creation-request-id";
@@ -217,6 +219,13 @@ export function MessageThread({
    */
   const translation = useThreadTranslation(contactUsername, messages);
 
+  /**
+   * Outgoing translation. Unlike `translation` above, this changes what is
+   * actually sent, so the composer blocks sending until its preview matches the
+   * draft.
+   */
+  const outgoing = useComposerTranslation(contactUsername, draft);
+
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const editInputRef = useRef<HTMLInputElement | null>(null);
   const lastIdRef = useRef<string | null>(initialMessages.at(-1)?.id ?? null);
@@ -367,9 +376,18 @@ export function MessageThread({
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    const body = draft.trim();
+    const typed = draft.trim();
 
-    if (body.length === 0) {
+    if (typed.length === 0) {
+      return;
+    }
+
+    // What actually gets sent, which is the translation when the sender chose to
+    // send in another language. Null means the preview does not yet match the
+    // draft, and sending text the sender has not seen is not acceptable.
+    const body = outgoing.resolve(typed);
+
+    if (body === null) {
       return;
     }
 
@@ -411,6 +429,9 @@ export function MessageThread({
     setMessages((current) => [...current, optimistic]);
     setDraft("");
     setReplyTarget(null);
+    // Drops the preview of the message just sent, so it does not sit under an
+    // empty composer.
+    outgoing.reset();
 
     startSending(async () => {
       const outcome = await sendDirectMessage(
@@ -431,7 +452,11 @@ export function MessageThread({
         // Hand the text back so it is not lost, but never clobber something the
         // user has started typing since. `pendingClientIdRef` is left set, so the
         // retry reuses the key and cannot create a duplicate.
-        setDraft((current) => (current.length === 0 ? body : current));
+        //
+        // `typed`, not `body`: handing back the translation would replace the
+        // sender's own words with a machine rendering of them, and retrying would
+        // then translate a translation.
+        setDraft((current) => (current.length === 0 ? typed : current));
         return;
       }
 
@@ -742,6 +767,7 @@ export function MessageThread({
                           text={translated.text}
                           sourceLanguage={translated.sourceLanguage}
                           targetLanguage={translation.target}
+                          viaPivot={translated.viaPivot}
                           outgoing={message.outgoing}
                         />
                       )}
@@ -887,6 +913,11 @@ export function MessageThread({
         </div>
       )}
 
+      <ComposerTranslationBar
+        translation={outgoing}
+        hasDraft={draft.trim().length > 0}
+      />
+
       <form
         onSubmit={handleSubmit}
         className="flex items-center gap-2 border-t px-3 py-3 sm:px-4"
@@ -910,11 +941,17 @@ export function MessageThread({
         <Button
           type="submit"
           size="icon"
-          disabled={draft.trim().length === 0}
+          // Blocked while a translation is outstanding: the translated text is
+          // what gets sent, so it must be on screen first.
+          disabled={draft.trim().length === 0 || !outgoing.isReady}
           className="h-11 w-11 shrink-0 sm:h-10 sm:w-10"
           aria-label={replyTarget === null ? "Send message" : "Send reply"}
         >
-          <Send className="h-4 w-4" />
+          {outgoing.isReady ? (
+            <Send className="h-4 w-4" />
+          ) : (
+            <LoaderCircle className="h-4 w-4 animate-spin" />
+          )}
         </Button>
       </form>
     </div>

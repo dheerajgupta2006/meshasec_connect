@@ -20,6 +20,7 @@ import {
 } from "react";
 
 import { leaveMeeting } from "@/app/meeting/[code]/actions";
+import { CaptionsProvider } from "@/components/meeting/room/captions-provider";
 import { MeetingChatProvider } from "@/components/meeting/room/chat-drawer";
 import { ReactionsProvider } from "@/components/meeting/room/reactions";
 import {
@@ -564,14 +565,20 @@ export function CallProvider({ children }: { children: ReactNode }) {
         {/* Above `children` so chat history and raised hands survive navigation. */}
         <MeetingChatProvider>
           <ReactionsProvider>
-            {children}
+            {/* Here rather than in `MeetingRoom` for the same reason as chat, plus
+                one specific to captions: if this unmounted on navigation, a
+                speaker glancing at the dashboard would stop captioning for
+                everybody else mid-sentence. */}
+            <CaptionsProvider>
+              {children}
 
-            {/* Exactly once, and outside the page, so audio keeps playing while
-                the user is on the dashboard. */}
-            <RoomAudioRenderer />
-            <SpeakerPreference speakerId={session.preferences.speakerId} />
+              {/* Exactly once, and outside the page, so audio keeps playing while
+                  the user is on the dashboard. */}
+              <RoomAudioRenderer />
+              <SpeakerPreference speakerId={session.preferences.speakerId} />
 
-            {!onMeetingPage && <MiniCallBar />}
+              {!onMeetingPage && <MiniCallBar />}
+            </CaptionsProvider>
           </ReactionsProvider>
         </MeetingChatProvider>
       </LiveKitRoom>

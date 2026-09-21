@@ -23,6 +23,8 @@ interface TranslatedBodyProps {
   /** Language the original was detected as, for the attribution line. */
   sourceLanguage: LanguageCode;
   targetLanguage: LanguageCode;
+  /** True when this went through English rather than straight across. */
+  viaPivot?: boolean;
   outgoing: boolean;
 }
 
@@ -30,6 +32,7 @@ export function TranslatedBody({
   text,
   sourceLanguage,
   targetLanguage,
+  viaPivot = false,
   outgoing,
 }: TranslatedBodyProps) {
   const direction = directionFor(targetLanguage);
@@ -51,6 +54,9 @@ export function TranslatedBody({
       >
         <Languages className="h-3 w-3 shrink-0" aria-hidden />
         Translated from {findLanguage(sourceLanguage).englishName}
+        {/* Two hops compound their errors, so a pivoted line is flagged rather
+            than presented with the same confidence as a direct one. */}
+        {viaPivot && <span className="opacity-80">via English</span>}
       </p>
 
       {/* `dir` and `lang` are set from the target language so the browser applies

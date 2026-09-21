@@ -4,6 +4,7 @@ import { AlertTriangle, ArrowLeft, LoaderCircle, LogIn, RotateCcw } from "lucide
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
+import { CaptionsOverlay } from "@/components/meeting/room/captions-overlay";
 import { ChatDrawer } from "@/components/meeting/room/chat-drawer";
 import { ControlDock } from "@/components/meeting/room/control-dock";
 import type { DrawerId } from "@/components/meeting/room/control-dock";
@@ -50,6 +51,8 @@ function MeetingStage({
   return (
     <MeetingRolesProvider meetingCode={meetingCode}>
     <MeetingPollsProvider>
+    {/* Captions themselves live in `CaptionsProvider` up in `CallProvider`; only
+        the overlay is rendered here, because it belongs over the video grid. */}
     <div className="relative flex h-full w-full flex-col overflow-hidden bg-zinc-950 text-zinc-100">
       <header className="flex shrink-0 items-center gap-3 px-3 py-2 sm:px-5 sm:py-3">
         <h1 className="truncate text-sm font-semibold tracking-tight sm:text-base">
@@ -61,6 +64,8 @@ function MeetingStage({
       </header>
 
       <VideoGrid layout={layout} className="flex-1 px-2 pb-24 sm:px-4 sm:pb-28" />
+
+      <CaptionsOverlay />
 
       <ControlDock
         layout={layout}

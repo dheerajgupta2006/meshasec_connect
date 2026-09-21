@@ -198,6 +198,7 @@ describe("translate", () => {
     await expect(engine.translate("hello", EN_TE)).resolves.toEqual({
       ok: true,
       text: "[te] hello",
+      viaPivot: false,
     });
   });
 
@@ -207,7 +208,7 @@ describe("translate", () => {
 
     await expect(
       engine.translate("hello", { source: "en", target: "en" }),
-    ).resolves.toEqual({ ok: true, text: "hello" });
+    ).resolves.toEqual({ ok: true, text: "hello", viaPivot: false });
     expect(translated).toEqual([]);
   });
 
@@ -218,6 +219,7 @@ describe("translate", () => {
     await expect(engine.translate("   ", EN_TE)).resolves.toEqual({
       ok: true,
       text: "   ",
+      viaPivot: false,
     });
     expect(translated).toEqual([]);
   });
@@ -318,6 +320,7 @@ describe("translate", () => {
     await expect(engine.translate("hello", EN_TE)).resolves.toEqual({
       ok: true,
       text: "ok:hello",
+      viaPivot: false,
     });
     expect(attempts).toBe(2);
   });
@@ -349,7 +352,7 @@ describe("translate", () => {
     ]);
 
     expect(bad.ok).toBe(false);
-    expect(good).toEqual({ ok: true, text: "ok:good" });
+    expect(good).toEqual({ ok: true, text: "ok:good", viaPivot: false });
     expect(calls).toBe(2);
   });
 
@@ -455,5 +458,168 @@ describe("reset", () => {
 
     expect(translated).toEqual(["hello", "hello"]);
     expect(createdPairs).toEqual(["en>te", "en>te"]);
+  });
+});
+
+describe("English pivot", () => {
+  const TE_TA: LanguagePair = { source: "te", target: "ta" };
+
+  /**
+   * A factory that serves only pairs involving English.
+   *
+   * This is the shape the real API may well have: Chrome does not publish which
+   * of the 600 non-English combinations it handles directly, and its page
+   * translation has always routed through English.
+   */
+  function englishOnlyFactory() {
+    const asked: string[] = [];
+    const translatedBy: string[] = [];
+
+    const factory: TranslatorFactory = {
+      availability: vi.fn(async ({ sourceLanguage, targetLanguage }) => {
+        asked.push(`${sourceLanguage}>${targetLanguage}`);
+
+        return sourceLanguage === "en" || targetLanguage === "en"
+          ? "available"
+          : "unavailable";
+      }),
+      create: vi.fn(async ({ sourceLanguage, targetLanguage }) => ({
+        translate: async (input: string) => {
+          translatedBy.push(`${sourceLanguage}>${targetLanguage}`);
+          return `${input}|${sourceLanguage}>${targetLanguage}`;
+        },
+      })),
+    };
+
+    return { factory, asked, translatedBy };
+  }
+
+  it("translates Telugu to Tamil through English when the direct pair is missing", () => {
+    const { factory, translatedBy } = englishOnlyFactory();
+    const engine = createTranslationEngine(factory);
+
+    return engine.translate("రేపు", TE_TA).then((outcome) => {
+      expect(outcome.ok).toBe(true);
+
+      if (outcome.ok) {
+        // Two hops, in order, rather than nothing at all.
+        expect(translatedBy).toEqual(["te>en", "en>ta"]);
+        expect(outcome.text).toBe("రేపు|te>en|en>ta");
+        expect(outcome.viaPivot).toBe(true);
+      }
+    });
+  });
+
+  it("marks a direct translation as not pivoted", async () => {
+    const { factory } = fakeFactory();
+    const outcome = await createTranslationEngine(factory).translate(
+      "hello",
+      EN_TE,
+    );
+
+    expect(outcome.ok).toBe(true);
+
+    if (outcome.ok) {
+      expect(outcome.viaPivot).toBe(false);
+    }
+  });
+
+  it("prefers a direct pair over a pivot", async () => {
+    const { factory, translated } = fakeFactory();
+    const engine = createTranslationEngine(factory);
+
+    await engine.translate("hello", TE_TA);
+
+    // One hop: a pivot would have translated twice and lost quality for nothing.
+    expect(translated).toEqual(["hello"]);
+  });
+
+  it("reports a pivoted pair as available through `availability`", async () => {
+    const { factory } = englishOnlyFactory();
+
+    await expect(
+      createTranslationEngine(factory).availability(TE_TA),
+    ).resolves.not.toBe("unavailable");
+  });
+
+  it("prepares both legs of a pivot", async () => {
+    const { factory } = englishOnlyFactory();
+    const engine = createTranslationEngine(factory);
+
+    await expect(engine.prepare(TE_TA)).resolves.toBe(true);
+    expect(factory.create).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not pivot when English is already one end of the pair", async () => {
+    // en>xx being unavailable cannot be fixed by going en>en>xx, and asking would
+    // just spend two more availability checks to learn nothing.
+    const factory: TranslatorFactory = {
+      availability: vi.fn(
+        async (): Promise<TranslatorAvailability> => "unavailable",
+      ),
+      create: vi.fn(),
+    };
+
+    const engine = createTranslationEngine(factory);
+    const outcome = await engine.translate("hello", {
+      source: "en",
+      target: "ta",
+    });
+
+    expect(outcome.ok).toBe(false);
+    expect(factory.availability).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports unavailable when neither leg exists", async () => {
+    const factory: TranslatorFactory = {
+      availability: vi.fn(
+        async (): Promise<TranslatorAvailability> => "unavailable",
+      ),
+      create: vi.fn(),
+    };
+
+    const outcome = await createTranslationEngine(factory).translate(
+      "రేపు",
+      TE_TA,
+    );
+
+    expect(outcome.ok).toBe(false);
+
+    if (!outcome.ok) {
+      expect(outcome.reason).toBe("unavailable");
+    }
+  });
+
+  it("resolves a route once and reuses it", async () => {
+    const { factory, asked } = englishOnlyFactory();
+    const engine = createTranslationEngine(factory);
+
+    await engine.translate("one", TE_TA);
+    await engine.translate("two", TE_TA);
+
+    // Three checks for the first call (direct, then both legs), none for the
+    // second: the answer cannot change within a session.
+    expect(asked).toEqual(["te>ta", "te>en", "en>ta"]);
+  });
+
+  it("forgets routes on reset", async () => {
+    const { factory, asked } = englishOnlyFactory();
+    const engine = createTranslationEngine(factory);
+
+    await engine.translate("one", TE_TA);
+    engine.reset();
+    await engine.translate("one", TE_TA);
+
+    expect(asked).toHaveLength(6);
+  });
+
+  it("caches a pivoted result like any other", async () => {
+    const { factory, translatedBy } = englishOnlyFactory();
+    const engine = createTranslationEngine(factory);
+
+    await engine.translate("రేపు", TE_TA);
+    await engine.translate("రేపు", TE_TA);
+
+    expect(translatedBy).toEqual(["te>en", "en>ta"]);
   });
 });

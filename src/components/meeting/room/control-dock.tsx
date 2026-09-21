@@ -3,6 +3,7 @@
 import { useLocalParticipant, useParticipants } from "@livekit/components-react";
 import {
   BarChart3,
+  Captions,
   Hand,
   LayoutGrid,
   MessageSquare,
@@ -34,6 +35,7 @@ import type { BackgroundEffect } from "@/lib/meetings/backgrounds";
 
 import { useCall } from "../call-provider";
 import { BackgroundControl } from "./background-control";
+import { CaptionsPanel, useCaptionsActive } from "./captions-control";
 import { useMeetingChat } from "./chat-drawer";
 import { InviteToCallModal } from "./invite-to-call-modal";
 import { ReactionPicker, useReactions } from "./reactions";
@@ -136,6 +138,8 @@ export function ControlDock({
   const router = useRouter();
 
   const [reactionsOpen, setReactionsOpen] = React.useState(false);
+  const [captionsOpen, setCaptionsOpen] = React.useState(false);
+  const captionsActive = useCaptionsActive();
   const [inviteOpen, setInviteOpen] = React.useState(false);
   const [micPending, setMicPending] = React.useState(false);
   const [cameraPending, setCameraPending] = React.useState(false);
@@ -436,6 +440,25 @@ export function ControlDock({
             className="w-auto border-white/10 bg-zinc-900/95 text-zinc-100 backdrop-blur-xl"
           >
             <ReactionPicker onAfterSelect={() => setReactionsOpen(false)} />
+          </PopoverContent>
+        </Popover>
+
+        <Popover open={captionsOpen} onOpenChange={setCaptionsOpen}>
+          <PopoverTrigger asChild>
+            <DockButton
+              label="Live captions and translation"
+              tone={captionsActive ? "on" : "neutral"}
+              aria-expanded={captionsOpen}
+              icon={<Captions className="h-5 w-5" aria-hidden="true" />}
+            />
+          </PopoverTrigger>
+          <PopoverContent
+            align="center"
+            side="top"
+            sideOffset={12}
+            className="w-auto border-white/10 bg-zinc-900/95 text-zinc-100 backdrop-blur-xl"
+          >
+            <CaptionsPanel />
           </PopoverContent>
         </Popover>
 

@@ -4,14 +4,14 @@
  * Reader-side translation for one message thread.
  *
  * The reader picks the language *they* want to read in. Every message is then
- * classified by script and translated into that language if it is not already in
- * it, which is what makes the feature bidirectional without anyone declaring what
- * language they write in: an English message shown to a Telugu reader is
- * translated, and the Telugu reply shown back to an English reader is too.
+ * identified and translated into that language if it is not already in it, which
+ * is what makes the feature bidirectional without anyone declaring what language
+ * they write in: an English message shown to a Telugu reader is translated, and
+ * the Telugu reply shown back to an English reader is too.
  *
- * Nothing is sent anywhere. Translation runs in the reader's browser, so the
- * choice is private to them, costs nothing to run, and no message body leaves the
- * device to be translated. That also means the choice is *not* shared with the
+ * Nothing is sent anywhere. Both detection and translation run in the reader's
+ * browser, so the choice is private to them, costs nothing to run, and no message
+ * body leaves the device. That also means the choice is *not* shared with the
  * other person and does not need to be.
  *
  * Originals are never replaced, only annotated. `translationFor` returns the
@@ -21,8 +21,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { detectLanguage } from "@/lib/i18n/detect-language";
 import { isLanguageCode, type LanguageCode } from "@/lib/i18n/languages";
+import {
+  createLanguageDetectorEngine,
+  type LanguageDetectorEngine,
+} from "@/lib/translation/detector";
 import {
   createTranslationEngine,
   type TranslationEngine,
@@ -38,8 +41,15 @@ export interface TranslatableMessage {
 
 export interface MessageTranslation {
   text: string;
-  /** What the original was detected as, for the "translated from" label. */
+  /** What the original was identified as, for the "translated from" label. */
   sourceLanguage: LanguageCode;
+  /**
+   * True when the text was translated in two hops via English.
+   *
+   * Surfaced because two translations compound their errors, so the reader should
+   * weigh a pivoted line a little more cautiously.
+   */
+  viaPivot: boolean;
 }
 
 export type TranslationStatus =
@@ -64,8 +74,10 @@ export interface ThreadTranslation {
   translationFor: (messageId: string) => MessageTranslation | null;
 }
 
-/** Namespaced per contact: reading Telugu with one friend and English with
- * another is the normal case, not an edge case. */
+/**
+ * Namespaced per contact: reading Telugu with one friend and English with
+ * another is the normal case, not an edge case.
+ */
 function storageKey(contactUsername: string): string {
   return `messages:${contactUsername}:readIn`;
 }
@@ -91,12 +103,13 @@ export function useThreadTranslation(
    * Created in an effect, not during render.
    *
    * This is a client component, so it also renders on the server, where the
-   * browser global is absent. Building the engine during render would make the
+   * browser globals are absent. Building the engines during render would make the
    * server and the first client render disagree about whether translation is
    * supported, which is a hydration mismatch. Both start at "no engine" and the
    * effect corrects it.
    */
   const [engine, setEngine] = useState<TranslationEngine | null>(null);
+  const [detector, setDetector] = useState<LanguageDetectorEngine | null>(null);
   const [target, setTargetState] = useState<LanguageCode | null>(null);
   const [status, setStatus] = useState<TranslationStatus>("unsupported");
   const [progress, setProgress] = useState(0);
@@ -105,7 +118,7 @@ export function useThreadTranslation(
   );
 
   /**
-   * Mirrors `entries` so the translate loop can check what it already has without
+   * Mirrors `entries` so the work loop can check what it already has without
    * taking `entries` as a dependency, which would restart the loop on every
    * result it produced.
    */
@@ -115,10 +128,14 @@ export function useThreadTranslation(
   }, [entries]);
 
   useEffect(() => {
-    const created = createTranslationEngine();
+    const createdEngine = createTranslationEngine();
 
-    setEngine(created);
-    setStatus(created.isSupported() ? "off" : "unsupported");
+    setEngine(createdEngine);
+    // The detector is created regardless of whether a model exists: without one
+    // it still resolves Indic scripts by character, which is the majority of what
+    // this app translates.
+    setDetector(createLanguageDetectorEngine());
+    setStatus(createdEngine.isSupported() ? "off" : "unsupported");
   }, []);
 
   // Restore the reader's choice once the engine is known to exist. Reading
@@ -153,6 +170,11 @@ export function useThreadTranslation(
         setStatus(
           engine !== null && engine.isSupported() ? "off" : "unsupported",
         );
+      } else {
+        // Called from a click, which is the only time the browser permits a model
+        // download. Warming the detector here rather than lazily means the first
+        // message does not wait on it.
+        void detector?.prepare();
       }
 
       try {
@@ -167,35 +189,29 @@ export function useThreadTranslation(
         // A failed write only costs the preference on reload.
       }
     },
-    [contactUsername, engine],
+    [contactUsername, engine, detector],
   );
 
   /**
-   * Bodies worth translating, paired with their detected language.
+   * Message bodies that could need translating.
    *
-   * Deleted and same-language messages are filtered out here so the effect below
-   * has nothing to decide, and the signature it depends on stays stable while the
-   * thread is merely being re-polled with identical content.
+   * Only the cheap, synchronous filtering happens here — deleted and blank
+   * bodies. Which language each one is in is not known until the model has been
+   * asked, so that decision moved into the async loop below.
    */
-  const pending = useMemo(() => {
+  const candidates = useMemo(() => {
     if (target === null) {
       return [];
     }
 
-    const items: { id: string; body: string; source: LanguageCode }[] = [];
+    const items: { id: string; body: string }[] = [];
 
     messages.forEach((message) => {
       if (message.deleted || message.body.trim().length === 0) {
         return;
       }
 
-      const source = detectLanguage(message.body);
-
-      if (source === null || source === target) {
-        return;
-      }
-
-      items.push({ id: message.id, body: message.body, source });
+      items.push({ id: message.id, body: message.body });
     });
 
     return items;
@@ -203,25 +219,32 @@ export function useThreadTranslation(
 
   /** Changes only when the work to do changes, not on every poll tick. */
   const signature = useMemo(
-    () => pending.map((item) => `${item.id}:${item.source}`).join("|"),
-    [pending],
+    () => candidates.map((item) => item.id).join("|"),
+    [candidates],
   );
 
-  const pendingRef = useRef(pending);
+  const candidatesRef = useRef(candidates);
   useEffect(() => {
-    pendingRef.current = pending;
-  }, [pending]);
+    candidatesRef.current = candidates;
+  }, [candidates]);
 
   useEffect(() => {
-    if (engine === null || !engine.isSupported() || target === null) {
+    if (
+      engine === null ||
+      detector === null ||
+      !engine.isSupported() ||
+      target === null
+    ) {
       return;
     }
 
     let cancelled = false;
-    const work = pendingRef.current;
+    const work = candidatesRef.current;
     // Bound explicitly: the null check above does not survive into the nested
     // async function, and every use below needs a non-null target.
     const readIn: LanguageCode = target;
+    const activeEngine = engine;
+    const activeDetector = detector;
 
     async function run(): Promise<void> {
       if (work.length === 0) {
@@ -229,29 +252,70 @@ export function useThreadTranslation(
         return;
       }
 
+      /** Resolved source language per message, for the pairs actually needed. */
+      const resolved: { id: string; body: string; source: LanguageCode }[] = [];
+
+      for (const item of work) {
+        if (cancelled) {
+          return;
+        }
+
+        // Already translated from this exact body into this exact language. An
+        // edit changes the body and so re-detects; a re-poll of unchanged text
+        // does neither.
+        const existing = entriesRef.current.get(item.id);
+
+        if (
+          existing !== undefined &&
+          existing.body === item.body &&
+          existing.target === readIn
+        ) {
+          continue;
+        }
+
+        const source = await activeDetector.detect(item.body);
+
+        if (cancelled) {
+          return;
+        }
+
+        // Undetectable, or already in the reader's language. Neither is an error.
+        if (source === null || source === readIn) {
+          continue;
+        }
+
+        resolved.push({ id: item.id, body: item.body, source });
+      }
+
+      if (cancelled) {
+        return;
+      }
+
+      if (resolved.length === 0) {
+        setStatus("ready");
+        return;
+      }
+
       // The distinct directions this thread actually needs, so a first run
       // downloads only the packs in use rather than every pair in the catalog.
-      const directions = new Map<string, LanguageCode>();
+      const sources: LanguageCode[] = [];
 
-      work.forEach((item) => {
-        directions.set(item.source, item.source);
+      resolved.forEach((item) => {
+        if (!sources.includes(item.source)) {
+          sources.push(item.source);
+        }
       });
 
       let anyReady = false;
       let sawUnavailable = false;
 
-      // `forEach` over a Map is used elsewhere in this project because the
-      // tsconfig declares no `target`; the same applies here.
-      const sources: LanguageCode[] = [];
-      directions.forEach((source) => sources.push(source));
-
       for (const source of sources) {
-        if (cancelled || engine === null) {
+        if (cancelled) {
           return;
         }
 
         const pair = { source, target: readIn };
-        const availability = await engine.availability(pair);
+        const availability = await activeEngine.availability(pair);
 
         if (cancelled) {
           return;
@@ -266,7 +330,7 @@ export function useThreadTranslation(
           setStatus("preparing");
         }
 
-        const ready = await engine.prepare(pair, (fraction) => {
+        const ready = await activeEngine.prepare(pair, (fraction) => {
           if (!cancelled) {
             setProgress(fraction);
           }
@@ -294,20 +358,12 @@ export function useThreadTranslation(
 
       setStatus("ready");
 
-      for (const item of work) {
-        if (cancelled || engine === null) {
+      for (const item of resolved) {
+        if (cancelled) {
           return;
         }
 
-        // Already translated from this exact body: an edit changes the body and
-        // so re-translates, a re-poll of unchanged text does not.
-        const existing = entriesRef.current.get(item.id);
-
-        if (existing !== undefined && existing.body === item.body) {
-          continue;
-        }
-
-        const outcome = await engine.translate(item.body, {
+        const outcome = await activeEngine.translate(item.body, {
           source: item.source,
           target: readIn,
         });
@@ -321,6 +377,7 @@ export function useThreadTranslation(
         }
 
         const translated = outcome.text;
+        const { viaPivot } = outcome;
 
         setEntries((current) => {
           const next = new Map(current);
@@ -330,6 +387,7 @@ export function useThreadTranslation(
             text: translated,
             sourceLanguage: item.source,
             target: readIn,
+            viaPivot,
           });
 
           return next;
@@ -342,9 +400,9 @@ export function useThreadTranslation(
     return () => {
       cancelled = true;
     };
-    // `signature` stands in for `pending`, which is a new array on every poll.
+    // `signature` stands in for `candidates`, which is a new array on every poll.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engine, target, signature]);
+  }, [engine, detector, target, signature]);
 
   const translationFor = useCallback(
     (messageId: string): MessageTranslation | null => {
@@ -362,7 +420,11 @@ export function useThreadTranslation(
       // twice would just look broken.
       return entry.text === entry.body
         ? null
-        : { text: entry.text, sourceLanguage: entry.sourceLanguage };
+        : {
+            text: entry.text,
+            sourceLanguage: entry.sourceLanguage,
+            viaPivot: entry.viaPivot,
+          };
     },
     [entries, target],
   );
