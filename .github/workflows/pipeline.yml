@@ -31,6 +31,14 @@ jobs:
     name: Verify
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # prisma.config.ts resolves env("DATABASE_URL") eagerly and throws when it is
+    # absent, so every Prisma CLI invocation needs the variable set, including the
+    # `prisma generate` that runs from `postinstall`. This placeholder is never
+    # dialled: `generate` only reads the schema, and the test suite is pinned to
+    # the node environment with no Prisma, Clerk, or network access. The real
+    # credentials stay in the Vercel project.
+    env:
+      DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 
