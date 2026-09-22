@@ -272,10 +272,35 @@ export function shareableState(state: PollsState): PollsState {
   };
 }
 
-function isModerator(
+/**
+ * Whether `identity` may be trusted with a message that carries moderation weight.
+ *
+ * An empty `moderators` list means "this client cannot judge", and the answer
+ * there is yes. That is not laxity — it is the only workable answer. The list
+ * comes from `getMeetingRoles`, which returns nothing for a guest (they have no
+ * account to resolve) and nothing for any client whose first roles read is still
+ * in flight or has failed. Failing closed on an unavailable list meant a guest
+ * joining mid-call never received the room's history and never recovered, because
+ * the snapshot request fires once and nothing re-asks.
+ *
+ * The other moderation messages do not need this: they arrive with server origin,
+ * which is unforgeable, so the list is not consulted at all. A snapshot travels
+ * participant-to-participant, so this is the only signal available.
+ *
+ * The residual risk is bounded on purpose. A snapshot is only ever accepted while
+ * local state is completely empty, so this cannot overwrite anything a client
+ * already has, and `shareableState` strips drafts on both send and receive. The
+ * worst a hostile participant achieves is one newcomer briefly seeing a doctored
+ * history, which the next real message corrects.
+ */
+function mayModerate(
   authority: PollsAuthority,
   identity: string | null,
 ): boolean {
+  if (authority.moderators.length === 0) {
+    return true;
+  }
+
   return identity !== null && authority.moderators.includes(identity);
 }
 
@@ -488,12 +513,16 @@ export function reducePolls(
       }
 
       // A snapshot restates who won a vote and what has been answered, so it
-      // carries moderation weight and is taken only from a moderator. A regular
+      // carries moderation weight and is preferred from a moderator. A regular
       // participant answering a newcomer could otherwise hand them a room where
       // every question is already marked answered.
+      //
+      // `mayModerate`, not a bare list check: see its comment for why an empty
+      // list has to mean yes. Failing closed there meant no guest ever received
+      // the room's history, because a guest's moderator list is always empty.
       if (
         origin.kind !== "participant" ||
-        !isModerator(authority, origin.identity)
+        !mayModerate(authority, origin.identity)
       ) {
         return state;
       }

@@ -15,13 +15,17 @@ import {
   authorizeMeetingJoin,
   recordAttendance,
 } from "@/lib/meetings/authorization";
+import { requireMeetingHost } from "@/lib/meetings/host-guard";
 import {
   actingHostId,
   applyHostSuccession,
 } from "@/lib/meetings/host-succession";
 import { ROOM_PASSCODE_DIGITS } from "@/lib/meetings/types";
 import { prisma } from "@/lib/prisma";
-import { describeRetryAfter } from "@/lib/rate-limit";
+import {
+  consumeRateLimit,
+  describeRetryAfter,
+} from "@/lib/rate-limit";
 import { ensureCurrentUser } from "@/lib/users/current-user";
 
 export interface RoomActionResult {
@@ -221,6 +225,21 @@ export async function knockForEntry(
   }
 
   if (existing === null) {
+    // Charged here rather than at the top of the function on purpose. Everything
+    // above is a read, and the waiting screen polls this to learn whether the host
+    // has decided yet — charging for that would throttle people for waiting. Only
+    // creating a new entry in someone's admit queue costs quota.
+    const attempt = consumeRateLimit("meetingKnock", me.id);
+
+    if (!attempt.allowed) {
+      return {
+        state: "error",
+        message: `Too many join requests. Try again in ${describeRetryAfter(
+          attempt.retryAfterSeconds,
+        )}.`,
+      };
+    }
+
     try {
       await prisma.waitingRoomEntry.create({
         data: { meetingId: meeting.id, userId: me.id },
@@ -245,29 +264,28 @@ export async function endMeeting(
   meetingCode: string,
 ): Promise<RoomActionResult> {
   try {
-    const me = await ensureCurrentUser();
+    /**
+     * Through the shared guard, at `"owner"` level.
+     *
+     * This used to resolve the caller, run `authorizeMeetingJoin`, re-read the
+     * meeting and compare `meeting.hostId !== me.id` — four steps to reach a
+     * decision `requireMeetingHost` already makes, and it compared the *creator*
+     * rather than the acting host. After a succession the person running the
+     * meeting could not end it while the creator who had left still could.
+     */
+    const host = await requireMeetingHost(meetingCode, "owner");
 
-    if (me === null) {
-      return { ok: false, message: SIGN_IN_REQUIRED };
-    }
-
-    const decision = await authorizeMeetingJoin(meetingCode, me.id);
-
-    if (!decision.allowed) {
-      return { ok: false, message: "That meeting is not available." };
+    if (host === null) {
+      return { ok: false, message: "Only the host can end this meeting." };
     }
 
     const meeting = await prisma.meeting.findUnique({
-      where: { id: decision.meeting.id },
-      select: { id: true, hostId: true, endsAt: true },
+      where: { id: host.meetingId },
+      select: { id: true, endsAt: true },
     });
 
     if (meeting === null) {
       return { ok: false, message: "That meeting is not available." };
-    }
-
-    if (meeting.hostId !== me.id) {
-      return { ok: false, message: "Only the host can end this meeting." };
     }
 
     // Already ended is a success, not an error: a double-click or a retry after a

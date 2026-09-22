@@ -15,6 +15,7 @@
 
 import { revalidatePath } from "next/cache";
 
+import { requireMeetingHost } from "@/lib/meetings/host-guard";
 import { maybeApplyHostSuccession } from "@/lib/meetings/host-succession";
 import { prisma } from "@/lib/prisma";
 import { ensureCurrentUser } from "@/lib/users/current-user";
@@ -63,8 +64,19 @@ const EMPTY: MeetingRoles = {
 /**
  * Resolves roles for one meeting.
  *
- * Readable by anyone who can see the meeting: the badges are public within a call,
- * and hiding them would not stop a participant seeing who moderates.
+ * Readable by people actually in the meeting. The badges are public *within* a
+ * call — hiding them from a participant would achieve nothing — but they were
+ * previously readable by any signed-in caller who named a meeting code, which is a
+ * different thing entirely. That leaked the host's and co-hosts' Clerk subject ids
+ * for any room, and confirmed whether a guessed code existed: the exact oracle
+ * `host-guard.ts` and `setCoHost` both use a single refusal string to avoid.
+ *
+ * Worse, it let an unrelated caller drive `maybeApplyHostSuccession` — a LiveKit
+ * round trip and a possible write to `Meeting.currentHostId` — against a meeting
+ * they had nothing to do with. The gate below is now in front of that.
+ *
+ * Non-members get `EMPTY`, which is the same answer as a meeting that does not
+ * exist, so nothing new can be inferred from the refusal.
  */
 export async function getMeetingRoles(
   meetingCode: string,
@@ -83,14 +95,35 @@ export async function getMeetingRoles(
       hostId: true,
       currentHostId: true,
       host: { select: { clerkId: true } },
+      // Widened from `isCoHost: true` so the caller's own enrollment row comes
+      // back in this same query. Membership is the gate immediately below, and
+      // asking for it separately would add a round trip to something every client
+      // in the call polls every few seconds.
       participants: {
-        where: { isCoHost: true },
-        select: { userId: true, user: { select: { clerkId: true } } },
+        where: { OR: [{ isCoHost: true }, { userId: me.id }] },
+        select: {
+          userId: true,
+          isCoHost: true,
+          user: { select: { clerkId: true } },
+        },
       },
     },
   });
 
   if (meeting === null) {
+    return EMPTY;
+  }
+
+  // The host is checked directly rather than through the roster: creating a
+  // meeting does not enroll you, so the owner frequently has no `Participant` row.
+  const isMember =
+    meeting.hostId === me.id ||
+    meeting.currentHostId === me.id ||
+    meeting.participants.some(
+      (participant) => participant.userId === me.id,
+    );
+
+  if (!isMember) {
     return EMPTY;
   }
 
@@ -108,6 +141,13 @@ export async function getMeetingRoles(
   let callerIsCoHost = false;
 
   meeting.participants.forEach((participant) => {
+    // The selection above also returns the caller's own row so membership could be
+    // checked without a second query, so co-host status has to be filtered here
+    // rather than assumed from the row's presence.
+    if (!participant.isCoHost) {
+      return;
+    }
+
     // The acting host is not also listed as a co-host: one badge per person.
     if (participant.userId === actingId) {
       return;
@@ -155,21 +195,30 @@ export async function setCoHost(
   targetIdentity: string,
   makeCoHost: boolean,
 ): Promise<RoleActionResult> {
-  const me = await ensureCurrentUser();
+  /**
+   * Through the shared guard rather than an inline comparison.
+   *
+   * This used to check `meeting.hostId !== me.id` itself, which is the *creator*,
+   * while `requireMeetingHost`'s `"owner"` level resolves the *acting* host. The
+   * two had already drifted: after a succession the person actually running the
+   * meeting could not appoint co-hosts, while the creator who had left still
+   * could. One definition of a permission, in one place, is the whole reason
+   * `host-guard` exists.
+   *
+   * Still returns null for not-signed-in, not-the-host and no-such-meeting alike,
+   * so the single refusal below keeps meeting codes unprobeable.
+   */
+  const host = await requireMeetingHost(meetingCode, "owner");
 
-  if (me === null) {
-    return { ok: false, message: "Your session has ended." };
+  if (host === null) {
+    return { ok: false, message: "Only the host can change co-hosts." };
   }
 
-  const meeting = await prisma.meeting.findUnique({
-    where: { meetingCode },
-    select: { id: true, hostId: true },
-  });
-
-  // One refusal for "not the host" and "no such meeting", so meeting codes cannot
-  // be probed.
-  if (meeting === null || meeting.hostId !== me.id) {
-    return { ok: false, message: "Only the host can change co-hosts." };
+  // Compared as identities rather than user ids, which also closes a gap: the
+  // creator-only comparison let the *acting* host be handed a co-host badge after
+  // a succession, leaving them holding both.
+  if (targetIdentity === host.hostClerkId) {
+    return { ok: false, message: "They are already the host." };
   }
 
   // LiveKit identity is the Clerk subject.
@@ -182,14 +231,10 @@ export async function setCoHost(
     return { ok: false, message: "That person is not a known account." };
   }
 
-  if (target.id === meeting.hostId) {
-    return { ok: false, message: "You are already the host." };
-  }
-
   // `updateMany` rather than `update`: someone may be in the room without an
   // enrollment row yet, and that should read as "not eligible" rather than throw.
   const updated = await prisma.participant.updateMany({
-    where: { meetingId: meeting.id, userId: target.id },
+    where: { meetingId: host.meetingId, userId: target.id },
     data: { isCoHost: makeCoHost },
   });
 

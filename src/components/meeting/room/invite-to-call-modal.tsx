@@ -59,6 +59,8 @@ export function InviteToCallModal({
   const [tab, setTab] = useState<TabId>("friends");
   const [friends, setFriends] = useState<InviteableFriend[]>([]);
   const [passcode, setPasscode] = useState<string | null>(null);
+  /** False for a participant who is not a host; distinct from "no passcode set". */
+  const [canRevealPasscode, setCanRevealPasscode] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -94,6 +96,7 @@ export function InviteToCallModal({
 
     setFriends(outcome.friends);
     setPasscode(outcome.passcode);
+    setCanRevealPasscode(outcome.canRevealPasscode);
   }, [meetingCode]);
 
   // Reloaded each time the modal opens rather than once on mount: someone may
@@ -377,7 +380,15 @@ export function InviteToCallModal({
                 Room passcode
               </span>
 
-              {passcode === null ? (
+              {!canRevealPasscode ? (
+                // Distinct from the message below on purpose: telling a
+                // participant the room has no passcode when it does would send
+                // them off to share a link that cannot work.
+                <p className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-3 text-sm text-zinc-400">
+                  Only the host can share the room passcode. Send them the link
+                  above and ask them to pass the code on.
+                </p>
+              ) : passcode === null ? (
                 <p className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-3 text-sm text-zinc-400">
                   This room has no passcode, so guests cannot join by link. It was
                   created before passcodes existed.

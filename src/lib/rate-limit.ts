@@ -55,6 +55,40 @@ export const RATE_LIMITS = {
    */
   meetingPasscode: { limit: 10, windowMs: 15 * 60 * 1000 },
   /**
+   * Failed guest passcode attempts for one meeting, summed across every caller.
+   *
+   * The per-subject budget above is keyed on a guest's IP, which is read from a
+   * request header. Where no proxy overwrites that header the caller chooses it,
+   * and a fresh key means a fresh budget — which is unlimited guessing against a
+   * six-digit secret. This counter is keyed on the meeting id, which comes from
+   * the database and cannot be rotated, so it bounds total guesses no matter how
+   * many identities or instances an attacker spreads them across.
+   *
+   * A hundred wrong codes in fifteen minutes is not something real guests do; it
+   * is roughly 9,600 a day, which leaves a million-code space needing months. The
+   * accepted trade is that an attacker willing to burn the budget can keep guests
+   * out for fifteen minutes at a time. That is worth it: the alternative is not a
+   * denial of service but a successful entry, and the host can still admit people
+   * by invite link while it lasts.
+   *
+   * Only failures consume, so a room filling up with legitimate guests never
+   * approaches it.
+   */
+  meetingPasscodeRoom: { limit: 100, windowMs: 15 * 60 * 1000 },
+  /**
+   * New waiting-room entries one account can create.
+   *
+   * Knocking inserts a row into a host's admit queue and shows the caller's name
+   * there, for any meeting code they can name — so unthrottled it is a way to spam
+   * a stranger's moderation panel, or to sweep guessed codes. Keyed on the user
+   * rather than the meeting for exactly that second reason: per-meeting counting
+   * would leave fanning out across many codes free.
+   *
+   * Only *creating* an entry consumes quota. Re-reading an existing one is how the
+   * waiting screen polls for a decision, and that has to stay free.
+   */
+  meetingKnock: { limit: 20, windowMs: 10 * 60 * 1000 },
+  /**
    * Host-only poll and Q&A moderation: launching, closing, marking answered.
    *
    * Each call fans out to every participant through the media server, so the

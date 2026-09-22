@@ -26,12 +26,28 @@ const MAX_MEETING_CODE_LENGTH = 128;
 /**
  * Token lifetime.
  *
- * LiveKit validates the token on the initial join and again on reconnect, so a
- * short TTL boots people out of long meetings after a network blip. Twelve hours
- * comfortably outlives any realistic session while still bounding replay of a
- * leaked token.
+ * LiveKit validates the token on the initial join and again on reconnect, and
+ * there is no API to hand a live room a replacement — so this value is exactly the
+ * window in which a *removed or banned* participant can rejoin.
+ *
+ * That is not theoretical. The token is returned in this route's JSON response,
+ * so it can be lifted straight out of devtools, and `room.connect()` against
+ * LiveKit never touches this app: `isGuestBanned`, `authorizeMeetingJoin`, the
+ * DENIED knock and `isLocked` are all skipped. At twelve hours — the previous
+ * value — removal, bans and room lock were effectively advisory for the rest of
+ * the working day.
+ *
+ * Thirty minutes because the cost of expiry is already handled. LiveKit retries a
+ * dropped connection internally, and when it gives up `CallProvider`'s
+ * `onDisconnected` shows a "Rejoin call" notice whose button re-mints here —
+ * re-running every ban, lock and approval check. So the worst an expiry causes is
+ * one click, and only after a blip long enough to exhaust LiveKit's own retries.
+ *
+ * This bounds the hole rather than closing it. Closing it needs LiveKit to consult
+ * the ban list at connect time, which means a `participant_joined` webhook that
+ * evicts a banned identity. Worth doing if removal needs to be immediate.
  */
-const TOKEN_TTL = "12h";
+const TOKEN_TTL = "30m";
 
 function readMeetingCode(value: unknown): string | null {
   if (typeof value !== "object" || value === null) {

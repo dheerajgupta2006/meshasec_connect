@@ -14,6 +14,10 @@ const isPublicRoute = createRouteMatcher([
   // before minting anything. Admission is enforced there, not here.
   "/api/meetings/guest",
   "/meeting/(.*)",
+  // Called by LiveKit, which has no Clerk session. Not unguarded: the handler
+  // verifies the webhook signature against LIVEKIT_API_SECRET and refuses
+  // anything it cannot authenticate.
+  "/api/livekit/webhook",
 ]);
 
 export default clerkMiddleware(async (auth, request) => {

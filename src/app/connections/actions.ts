@@ -17,6 +17,7 @@ import {
 } from "@/lib/connections/queries";
 import { sendConnectionRequestEmail } from "@/lib/email/connection-request-email";
 import { authorizeMeetingJoin } from "@/lib/meetings/authorization";
+import { requireMeetingHost } from "@/lib/meetings/host-guard";
 import {
   generateMeetingCode,
   generateRoomPasscode,
@@ -503,6 +504,14 @@ export interface InviteableFriendsResult {
   friends: InviteableFriend[];
   /** Null unless the caller is entitled to see it. */
   passcode: string | null;
+  /**
+   * Whether the caller is allowed to see the passcode at all.
+   *
+   * Distinguishes "you may not see this" from "there is nothing to see", which the
+   * UI has to tell apart: a room genuinely created before passcodes existed needs a
+   * different explanation from a participant who simply is not the host.
+   */
+  canRevealPasscode: boolean;
 }
 
 /**
@@ -513,14 +522,17 @@ export interface InviteableFriendsResult {
  * already enrolled are filtered out, because inviting them again would ring
  * someone who is sitting in the call.
  *
- * The room passcode rides along in the same response: the modal needs it for its
- * share tab, and fetching it separately would mean a second authorization check
- * for the same question.
+ * The room passcode rides along in the same response, but only for a host or
+ * co-host. It used to be returned to anyone `enrolled`, and enrollment is granted
+ * automatically — `recordAttendance` runs on every successful token mint, and an
+ * open meeting admits any signed-in link holder. So joining an open room once was
+ * enough to read the six-digit code that the entire unauthenticated guest path
+ * accepts as proof. Sharing the room is a host's decision, so it is gated like one.
  */
 export async function getInviteableFriends(
   meetingCode: string,
 ): Promise<InviteableFriendsResult> {
-  const empty = { friends: [], passcode: null };
+  const empty = { friends: [], passcode: null, canRevealPasscode: false };
 
   const me = await ensureCurrentUser();
 
@@ -541,7 +553,10 @@ export async function getInviteableFriends(
     };
   }
 
-  const [meeting, connections] = await Promise.all([
+  // Run alongside the two reads below rather than before them: the answer only
+  // decides whether the passcode is included, so nothing has to wait on it.
+  const [moderator, meeting, connections] = await Promise.all([
+    requireMeetingHost(meetingCode, "moderator"),
     prisma.meeting.findUnique({
       where: { id: decision.meeting.id },
       select: {
@@ -599,11 +614,16 @@ export async function getInviteableFriends(
     ),
   );
 
+  const canRevealPasscode = moderator !== null;
+
   return {
     ok: true,
     message: friends.length === 0 ? "No one left to invite." : "",
     friends,
-    passcode: meeting.passcode,
+    // Withheld entirely rather than blanked, so a non-host response carries no
+    // trace of the value.
+    passcode: canRevealPasscode ? meeting.passcode : null,
+    canRevealPasscode,
   };
 }
 
@@ -646,6 +666,30 @@ export async function inviteFriendToCall(
       ok: false,
       message: "You must be in this meeting to invite people.",
     };
+  }
+
+  /**
+   * A private room is the host's to open, so only a host or co-host may pull
+   * someone new into one.
+   *
+   * Enrollment alone was not a sufficient gate. This action *permanently* enrolls
+   * the invitee, which is what lets them skip the passcode prompt and survive
+   * `isLocked` — so in a private 1-on-1 between two people, either one could add
+   * their own contact to the other's call, with no consent and no notification.
+   *
+   * Deliberately not applied to open meetings: anyone holding that link can already
+   * walk in, so requiring a host there would restrict nothing and would break
+   * mid-call invites for ordinary participants.
+   */
+  if (decision.meeting.isPrivate) {
+    const moderator = await requireMeetingHost(meetingCode, "moderator");
+
+    if (moderator === null) {
+      return {
+        ok: false,
+        message: "Only the host can invite more people to this call.",
+      };
+    }
   }
 
   const friend = await prisma.user.findUnique({

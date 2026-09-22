@@ -100,10 +100,9 @@ export async function admitGuest(
     return { allowed: false, reason: "passcode_required" };
   }
 
-  const attempt = consumeRateLimit(
-    "meetingPasscode",
-    `guest:${meeting.id}:${attemptSubject}`,
-  );
+  const subjectKey = `guest:${meeting.id}:${attemptSubject}`;
+
+  const attempt = consumeRateLimit("meetingPasscode", subjectKey);
 
   if (!attempt.allowed) {
     return {
@@ -113,12 +112,34 @@ export async function admitGuest(
     };
   }
 
+  /**
+   * Second budget, keyed on the meeting rather than the caller.
+   *
+   * `attemptSubject` is derived from a request header, so an attacker who can
+   * choose it gets a fresh per-caller budget on every request — which is
+   * unlimited guessing. The meeting id comes from the database, so this key cannot
+   * be rotated and is what actually bounds the number of guesses a room can ever
+   * receive.
+   */
+  const roomAttempt = consumeRateLimit("meetingPasscodeRoom", meeting.id);
+
+  if (!roomAttempt.allowed) {
+    return {
+      allowed: false,
+      reason: "passcode_throttled",
+      retryAfterSeconds: roomAttempt.retryAfterSeconds,
+    };
+  }
+
   if (!passcodeMatches(meeting.passcode, normalized)) {
     return { allowed: false, reason: "passcode_invalid" };
   }
 
-  // Correct: refund so a guest who mistypes once is not penalised.
-  refundRateLimit("meetingPasscode", `guest:${meeting.id}:${attemptSubject}`);
+  // Both budgets are refunded, so only *failures* ever count. A guest who
+  // mistypes once and then succeeds costs the room nothing, and a busy meeting
+  // cannot throttle itself simply by admitting people.
+  refundRateLimit("meetingPasscode", subjectKey);
+  refundRateLimit("meetingPasscodeRoom", meeting.id);
 
   return {
     allowed: true,
@@ -259,14 +280,44 @@ export async function isGuestBanned(
 }
 
 /**
+ * Headers a platform sets from the real connection, in descending trust order.
+ *
+ * These are set by the edge and overwritten on every request, so a client cannot
+ * choose its own value through them. `x-forwarded-for` is deliberately not here:
+ * it is a list a client can prepend to, and it is only trustworthy when something
+ * in front of the app rewrites it.
+ */
+const PLATFORM_IP_HEADERS = ["x-vercel-forwarded-for", "x-real-ip"] as const;
+
+/**
  * Best-effort client address, used only as a rate-limit key.
  *
- * Never used for access control: `x-forwarded-for` is client-supplied and only
- * trustworthy because Vercel's proxy overwrites it. A spoofed value here can at
- * worst give the attacker a fresh attempt budget, which is why the budget is not
- * the only defence — the passcode still has to be right.
+ * Never used for access control. Platform-set headers are preferred over
+ * `x-forwarded-for` precisely because the latter is attacker-controlled wherever
+ * no proxy rewrites it — and a chosen key means a fresh attempt budget, which
+ * against a six-digit passcode is unlimited guessing rather than the "at worst one
+ * more attempt" this previously assumed.
+ *
+ * Getting this wrong is no longer decisive either way: `admitGuest` also consumes
+ * a `meetingPasscodeRoom` budget keyed on the meeting id, which no header can
+ * influence. This function now only decides how *fairly* the per-caller budget is
+ * shared, not whether a budget exists at all.
  */
 export function clientAddress(request: Request): string {
+  for (const header of PLATFORM_IP_HEADERS) {
+    const value = request.headers.get(header);
+
+    if (value !== null && value.trim().length > 0) {
+      // Even these can carry a list on some platforms; the first entry is the one
+      // the edge observed.
+      const first = value.split(",")[0]?.trim();
+
+      if (first !== undefined && first.length > 0) {
+        return first.slice(0, 64);
+      }
+    }
+  }
+
   const forwarded = request.headers.get("x-forwarded-for");
 
   if (forwarded !== null && forwarded.length > 0) {
@@ -277,5 +328,5 @@ export function clientAddress(request: Request): string {
     }
   }
 
-  return request.headers.get("x-real-ip")?.slice(0, 64) ?? "unknown";
+  return "unknown";
 }
