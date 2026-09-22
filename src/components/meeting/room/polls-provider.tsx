@@ -5,39 +5,55 @@ import type { Participant } from "livekit-client";
 import * as React from "react";
 
 import {
+  closePoll as closePollOnServer,
+  launchPoll as launchPollOnServer,
+  markQuestionAnswered as markAnsweredOnServer,
+} from "@/app/meeting/[code]/polls";
+import {
   EMPTY_POLLS_STATE,
+  MAX_POLL_QUESTION_CHARS,
+  MAX_QUESTION_CHARS,
+  POLLS_TOPIC,
   normalizePollDraft,
+  normalizeQuestionBody,
+  reduceDraft,
   reducePolls,
+  shareableState,
+  type MessageOrigin,
   type Poll,
   type PollsMessage,
   type PollsState,
   type Question,
-  MAX_POLL_QUESTION_CHARS,
-  MAX_QUESTION_CHARS,
 } from "@/lib/meetings/poll-state";
 
-/**
- * Shared with reactions: LiveKit has one data channel, so a topic is only a
- * filter. A separate topic keeps poll traffic out of the reaction handler.
- */
-const POLLS_TOPIC = "meshasec-room-polls";
+import { useMeetingRoles } from "./roles-provider";
 
-/** How long to wait for someone to answer a snapshot request before giving up. */
-const SNAPSHOT_TIMEOUT_MS = 2500;
+/** How long after joining to ask the room for the state so far. */
+const SNAPSHOT_REQUEST_DELAY_MS = 600;
+
+export interface PollsActionOutcome {
+  ok: boolean;
+  message: string;
+}
 
 interface PollsContextValue {
   state: PollsState;
   /** Null until the room is connected. */
   localIdentity: string | null;
-  openPoll: (
-    question: string,
-    options: string[],
-  ) => { ok: boolean; message: string };
+
+  // --- Open to everyone in the room. Sent peer-to-peer. ---
   vote: (pollId: string, optionIndex: number) => void;
-  closePoll: (pollId: string) => void;
-  askQuestion: (body: string) => { ok: boolean; message: string };
+  askQuestion: (body: string) => PollsActionOutcome;
   upvoteQuestion: (questionId: string) => void;
-  markAnswered: (questionId: string) => void;
+
+  // --- Composing, on the host's own client only. Never broadcast. ---
+  draftPoll: (question: string, options: string[]) => PollsActionOutcome;
+  discardDraft: (pollId: string) => void;
+
+  // --- Moderation. Checked and published by the server. ---
+  launchPoll: (pollId: string) => Promise<PollsActionOutcome>;
+  closePoll: (pollId: string) => Promise<PollsActionOutcome>;
+  markAnswered: (questionId: string) => Promise<PollsActionOutcome>;
 }
 
 const PollsContext = React.createContext<PollsContextValue | null>(null);
@@ -72,6 +88,7 @@ function parsePayload(payload: Uint8Array): PollsMessage | null {
 
 function newId(): string {
   // Room-local and short-lived, so uniqueness only has to hold within one call.
+  // Lowercase alnum plus a hyphen, which is what the server's id check allows.
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
@@ -80,14 +97,30 @@ function newId(): string {
  *
  * Nothing is stored server-side. That keeps a show of hands from becoming a
  * permanent record, at the cost of needing a catch-up path: a client that joins
- * mid-call broadcasts a snapshot request, and whoever already has state answers it.
+ * mid-call broadcasts a snapshot request, and a moderator who already has state
+ * answers it.
+ *
+ * Two classes of traffic share the topic, and the difference is the whole security
+ * model of the feature:
+ *
+ * - Votes, questions and upvotes are published by the participant doing them. The
+ *   media server stamps the sender's identity on the packet, so the actor cannot
+ *   be faked, and these apply locally before they are sent so they feel instant.
+ * - Launching, closing and marking answered are published by *our server*, after
+ *   `src/app/meeting/[code]/polls.ts` has proved the caller moderates the meeting.
+ *   They are deliberately not applied locally: the moderator sees the change when
+ *   the room does, so a refused or undelivered action never leaves their view
+ *   disagreeing with everyone else's.
  */
 export function MeetingPollsProvider({
+  meetingCode,
   children,
 }: {
+  meetingCode: string;
   children: React.ReactNode;
 }) {
   const room = useRoomContext();
+  const { canModerate, moderatorIdentities } = useMeetingRoles();
   const [state, setState] = React.useState<PollsState>(EMPTY_POLLS_STATE);
 
   const stateRef = React.useRef(state);
@@ -95,22 +128,52 @@ export function MeetingPollsProvider({
     stateRef.current = state;
   }, [state]);
 
+  // Read inside the data-channel handler, which is deliberately not re-created on
+  // every roles poll — a new callback there would re-subscribe the channel.
+  const moderatorsRef = React.useRef(moderatorIdentities);
+  React.useEffect(() => {
+    moderatorsRef.current = moderatorIdentities;
+  }, [moderatorIdentities]);
+
+  const canModerateRef = React.useRef(canModerate);
+  React.useEffect(() => {
+    canModerateRef.current = canModerate;
+  }, [canModerate]);
+
   const handleIncoming = React.useCallback(
     (payload: Uint8Array, from: Participant | undefined) => {
-      if (from === undefined || from.identity.length === 0) {
-        return;
-      }
-
       const message = parsePayload(payload);
 
       if (message === null) {
         return;
       }
 
-      // A newcomer asking for history. Answer only if there is something to send,
-      // so an empty room does not produce a burst of empty snapshots.
+      /**
+       * A packet with no sender came from the LiveKit server API, which only this
+       * app's server can call and only after a host check. A packet with a sender
+       * carries the identity the media server stamped on it.
+       *
+       * `from` defined but empty is treated as neither: it should not occur, and
+       * reading it as server origin would turn an oddity into a bypass.
+       */
+      if (from !== undefined && from.identity.length === 0) {
+        return;
+      }
+
+      const origin: MessageOrigin =
+        from === undefined
+          ? { kind: "server" }
+          : { kind: "participant", identity: from.identity };
+
+      // A newcomer asking for history. Answered only by a moderator, and only if
+      // there is something to send, so an empty room does not produce a burst of
+      // empty snapshots.
       if (message.kind === "snapshot_request") {
-        const current = stateRef.current;
+        if (origin.kind !== "participant" || !canModerateRef.current) {
+          return;
+        }
+
+        const current = shareableState(stateRef.current);
 
         if (current.polls.length === 0 && current.questions.length === 0) {
           return;
@@ -124,9 +187,12 @@ export function MeetingPollsProvider({
         return;
       }
 
-      // The sender's identity comes from the packet, never the payload, so nobody
-      // can vote or ask as somebody else.
-      setState((current) => reducePolls(current, message, from.identity));
+      setState((current) =>
+        reducePolls(current, message, {
+          origin,
+          moderators: moderatorsRef.current,
+        }),
+      );
     },
     [],
   );
@@ -155,37 +221,44 @@ export function MeetingPollsProvider({
     void sendRef.current(payload, { reliable: true }).catch(() => undefined);
   }, []);
 
-  // Ask for history once on join. Harmless if nobody answers — the timeout only
-  // exists so the request is not repeated.
+  // Ask for history once on join. Harmless if nobody answers.
   React.useEffect(() => {
     const timer = window.setTimeout(() => {
       broadcast({ kind: "snapshot_request" });
-    }, 600);
-
-    const giveUp = window.setTimeout(() => undefined, SNAPSHOT_TIMEOUT_MS);
+    }, SNAPSHOT_REQUEST_DELAY_MS);
 
     return () => {
       window.clearTimeout(timer);
-      window.clearTimeout(giveUp);
     };
   }, [broadcast]);
 
   const localIdentity = room.localParticipant.identity || null;
 
-  /** Applies locally as well as broadcasting: the sender sees no round trip. */
+  /**
+   * Applies a participant message locally as well as broadcasting it, so the
+   * sender sees no round trip. Only ever used for the open actions — moderation
+   * waits for the server.
+   */
   const applyLocally = React.useCallback(
     (message: PollsMessage) => {
       if (localIdentity === null) {
         return;
       }
 
-      setState((current) => reducePolls(current, message, localIdentity));
+      setState((current) =>
+        reducePolls(current, message, {
+          origin: { kind: "participant", identity: localIdentity },
+          moderators: moderatorsRef.current,
+        }),
+      );
     },
     [localIdentity],
   );
 
-  const openPoll = React.useCallback(
-    (question: string, options: string[]) => {
+  // --- Composing -------------------------------------------------------------
+
+  const draftPoll = React.useCallback(
+    (question: string, options: string[]): PollsActionOutcome => {
       const draft = normalizePollDraft(question, options);
 
       if (!draft.ok) {
@@ -201,19 +274,81 @@ export function MeetingPollsProvider({
         question: draft.question,
         options: draft.options,
         votes: {},
-        closed: false,
+        status: "draft",
         createdAt: Date.now(),
         createdBy: localIdentity,
       };
 
-      const message: PollsMessage = { kind: "poll_opened", poll };
-      applyLocally(message);
-      broadcast(message);
+      // Local only. Nothing is broadcast until the host launches it, which is what
+      // makes "drafts are private" a property of the wire rather than of the UI.
+      setState((current) =>
+        reduceDraft(current, { kind: "poll_drafted", poll }, localIdentity),
+      );
 
-      return { ok: true, message: "Poll opened." };
+      return { ok: true, message: "Draft saved." };
     },
-    [applyLocally, broadcast, localIdentity],
+    [localIdentity],
   );
+
+  const discardDraft = React.useCallback(
+    (pollId: string) => {
+      if (localIdentity === null) {
+        return;
+      }
+
+      setState((current) =>
+        reduceDraft(current, { kind: "poll_discarded", pollId }, localIdentity),
+      );
+    },
+    [localIdentity],
+  );
+
+  // --- Moderation, via the server -------------------------------------------
+
+  const launchPoll = React.useCallback(
+    async (pollId: string): Promise<PollsActionOutcome> => {
+      const draft = stateRef.current.polls.find((poll) => poll.id === pollId);
+
+      if (draft === undefined || draft.status !== "draft") {
+        return { ok: false, message: "That draft is no longer available." };
+      }
+
+      try {
+        return await launchPollOnServer(meetingCode, {
+          id: draft.id,
+          question: draft.question,
+          options: draft.options,
+        });
+      } catch {
+        return { ok: false, message: "We could not launch that poll." };
+      }
+    },
+    [meetingCode],
+  );
+
+  const closePoll = React.useCallback(
+    async (pollId: string): Promise<PollsActionOutcome> => {
+      try {
+        return await closePollOnServer(meetingCode, pollId);
+      } catch {
+        return { ok: false, message: "We could not close that poll." };
+      }
+    },
+    [meetingCode],
+  );
+
+  const markAnswered = React.useCallback(
+    async (questionId: string): Promise<PollsActionOutcome> => {
+      try {
+        return await markAnsweredOnServer(meetingCode, questionId);
+      } catch {
+        return { ok: false, message: "We could not update that question." };
+      }
+    },
+    [meetingCode],
+  );
+
+  // --- Open to everyone ------------------------------------------------------
 
   const vote = React.useCallback(
     (pollId: string, optionIndex: number) => {
@@ -224,21 +359,12 @@ export function MeetingPollsProvider({
     [applyLocally, broadcast],
   );
 
-  const closePoll = React.useCallback(
-    (pollId: string) => {
-      const message: PollsMessage = { kind: "poll_closed", pollId };
-      applyLocally(message);
-      broadcast(message);
-    },
-    [applyLocally, broadcast],
-  );
-
   const askQuestion = React.useCallback(
-    (body: string) => {
-      const cleaned = body.replace(/\s+/g, " ").trim().slice(0, MAX_QUESTION_CHARS);
+    (body: string): PollsActionOutcome => {
+      const cleaned = normalizeQuestionBody(body);
 
-      if (cleaned.length === 0) {
-        return { ok: false, message: "Write a question first." };
+      if (!cleaned.ok) {
+        return { ok: false, message: cleaned.message };
       }
 
       if (localIdentity === null) {
@@ -247,7 +373,7 @@ export function MeetingPollsProvider({
 
       const question: Question = {
         id: newId(),
-        body: cleaned,
+        body: cleaned.body,
         askedBy: localIdentity,
         askedByName:
           room.localParticipant.name && room.localParticipant.name.length > 0
@@ -276,34 +402,29 @@ export function MeetingPollsProvider({
     [applyLocally, broadcast],
   );
 
-  const markAnswered = React.useCallback(
-    (questionId: string) => {
-      const message: PollsMessage = { kind: "question_answered", questionId };
-      applyLocally(message);
-      broadcast(message);
-    },
-    [applyLocally, broadcast],
-  );
-
   const value = React.useMemo<PollsContextValue>(
     () => ({
       state,
       localIdentity,
-      openPoll,
       vote,
-      closePoll,
       askQuestion,
       upvoteQuestion,
+      draftPoll,
+      discardDraft,
+      launchPoll,
+      closePoll,
       markAnswered,
     }),
     [
       state,
       localIdentity,
-      openPoll,
       vote,
-      closePoll,
       askQuestion,
       upvoteQuestion,
+      draftPoll,
+      discardDraft,
+      launchPoll,
+      closePoll,
       markAnswered,
     ],
   );

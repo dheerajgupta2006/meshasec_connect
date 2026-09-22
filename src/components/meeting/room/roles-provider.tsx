@@ -20,6 +20,7 @@ const EMPTY: MeetingRoles = {
   ok: false,
   hostIdentity: null,
   coHostIdentities: [],
+  creatorIdentity: null,
   isHost: false,
   isCoHost: false,
   isCreator: false,
@@ -28,6 +29,15 @@ const EMPTY: MeetingRoles = {
 interface RolesContextValue extends MeetingRoles {
   /** True for the host or a co-host: the people who see moderation controls. */
   canModerate: boolean;
+  /**
+   * Every identity entitled to moderate: acting host, co-hosts, and the creator.
+   *
+   * Exists so features that receive moderation decisions over the data channel can
+   * check the actor named in a message against the same set the server gates on.
+   * Mirrors `requireMeetingHost` — if these two ever disagree, legitimate actions
+   * get silently dropped by recipients.
+   */
+  moderatorIdentities: string[];
   /** Whether a given LiveKit identity is the host. */
   isHostIdentity: (identity: string) => boolean;
   isCoHostIdentity: (identity: string) => boolean;
@@ -129,11 +139,22 @@ export function MeetingRolesProvider({
   const value = React.useMemo<RolesContextValue>(() => {
     const coHosts = new Set(roles.coHostIdentities);
 
+    // Deduplicated because the creator is usually also the acting host, and a
+    // moderator listed twice would be harmless but misleading to debug.
+    const moderatorIdentities = Array.from(
+      new Set(
+        [roles.hostIdentity, roles.creatorIdentity, ...roles.coHostIdentities].filter(
+          (identity): identity is string => identity !== null,
+        ),
+      ),
+    );
+
     return {
       ...roles,
       // The creator is included so handing the room over cannot lock them out of
       // moderating a meeting they opened.
       canModerate: roles.isHost || roles.isCoHost || roles.isCreator,
+      moderatorIdentities,
       isHostIdentity: (identity: string) =>
         roles.hostIdentity !== null && identity === roles.hostIdentity,
       isCoHostIdentity: (identity: string) => coHosts.has(identity),

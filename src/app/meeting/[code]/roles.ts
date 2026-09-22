@@ -28,6 +28,16 @@ export interface MeetingRoles {
    */
   hostIdentity: string | null;
   coHostIdentities: string[];
+  /**
+   * LiveKit identity of whoever opened the meeting, which is not always the
+   * acting host once the room has been handed over.
+   *
+   * Reported because the creator keeps moderation rights, so any client deciding
+   * whether a moderation message is legitimate has to count them in. Leaving them
+   * out made the server and the clients disagree: the server would let the
+   * creator close a poll and every recipient would then discard the message.
+   */
+  creatorIdentity: string | null;
   /** True when the caller owns the meeting. */
   isHost: boolean;
   /** True when the caller has been granted co-host. */
@@ -44,6 +54,7 @@ const EMPTY: MeetingRoles = {
   ok: false,
   hostIdentity: null,
   coHostIdentities: [],
+  creatorIdentity: null,
   isHost: false,
   isCoHost: false,
   isCreator: false,
@@ -71,6 +82,7 @@ export async function getMeetingRoles(
       meetingCode: true,
       hostId: true,
       currentHostId: true,
+      host: { select: { clerkId: true } },
       participants: {
         where: { isCoHost: true },
         select: { userId: true, user: { select: { clerkId: true } } },
@@ -116,6 +128,7 @@ export async function getMeetingRoles(
     ok: true,
     hostIdentity: acting?.clerkId ?? null,
     coHostIdentities,
+    creatorIdentity: meeting.host.clerkId,
     isHost,
     // The host already outranks a co-host, so never both.
     isCoHost: callerIsCoHost && !isHost,

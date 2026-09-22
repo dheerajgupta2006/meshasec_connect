@@ -13,109 +13,22 @@ import { KnockStatus } from "@prisma/client";
 import { revalidatePath } from "next/cache";
 
 import {
+  NOT_HOST,
+  requireMeetingHost as requireHost,
+} from "@/lib/meetings/host-guard";
+import {
   moderationConfigured,
   muteEveryoneElse,
   muteParticipant,
   removeOccupant,
 } from "@/lib/meetings/livekit-admin";
 import { guestIdFromIdentity } from "@/lib/meetings/guest-session";
-import { actingHostId } from "@/lib/meetings/host-succession";
 import { prisma } from "@/lib/prisma";
 import { ensureCurrentUser } from "@/lib/users/current-user";
 
 export interface ModerationResult {
   ok: boolean;
   message: string;
-}
-
-/**
- * One refusal for every gate failure: not signed in, not the host, no such
- * meeting. Distinguishing them would let anyone probe meeting codes and learn who
- * hosts what.
- */
-const NOT_HOST = "Only the host can do that.";
-
-interface HostContext {
-  meetingId: string;
-  meetingCode: string;
-  /** Clerk subject, which is what LiveKit uses as the participant identity. */
-  hostClerkId: string | null;
-  localUserId: string;
-  /** True only for the meeting owner, false for a co-host. */
-  isOwner: boolean;
-}
-
-/**
- * Resolves the caller and proves they may moderate `meetingCode`.
- *
- * `level` separates the two tiers deliberately:
- * - `"moderator"` admits the host *and* co-hosts. Muting, removing, locking and
- *   admitting are all delegated powers.
- * - `"owner"` admits only the host. Ending the meeting and appointing co-hosts are
- *   ownership, not moderation — a co-host who could do either would be able to
- *   close someone else's meeting or make the role self-propagating.
- *
- * Returns null on any failure so a caller cannot mistake a refusal for success.
- * The refusal message is intentionally identical for "not permitted" and "no such
- * meeting", so meeting codes cannot be probed.
- */
-async function requireHost(
-  meetingCode: string,
-  level: "owner" | "moderator" = "moderator",
-): Promise<HostContext | null> {
-  const me = await ensureCurrentUser();
-
-  if (me === null) {
-    return null;
-  }
-
-  const meeting = await prisma.meeting.findUnique({
-    where: { meetingCode },
-    select: {
-      id: true,
-      meetingCode: true,
-      hostId: true,
-      currentHostId: true,
-      participants: {
-        where: { userId: me.id, isCoHost: true },
-        select: { id: true },
-        take: 1,
-      },
-    },
-  });
-
-  if (meeting === null) {
-    return null;
-  }
-
-  // The acting host, which may be a successor rather than the creator.
-  const actingId = actingHostId(meeting);
-  const isOwner = actingId === me.id;
-  const isCreator = meeting.hostId === me.id;
-  const isCoHost = meeting.participants.length > 0;
-
-  if (level === "owner" && !isOwner) {
-    return null;
-  }
-
-  // The creator keeps moderation rights after handing the room over: opening a
-  // meeting must never leave you unable to moderate it.
-  if (!isOwner && !isCreator && !isCoHost) {
-    return null;
-  }
-
-  const acting = await prisma.user.findUnique({
-    where: { id: actingId },
-    select: { clerkId: true },
-  });
-
-  return {
-    meetingId: meeting.id,
-    meetingCode: meeting.meetingCode,
-    hostClerkId: acting?.clerkId ?? null,
-    localUserId: me.id,
-    isOwner,
-  };
 }
 
 /** Mutes every microphone in the room except the host's own. */

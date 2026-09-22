@@ -54,6 +54,14 @@ export const RATE_LIMITS = {
    * never throttled.
    */
   meetingPasscode: { limit: 10, windowMs: 15 * 60 * 1000 },
+  /**
+   * Host-only poll and Q&A moderation: launching, closing, marking answered.
+   *
+   * Each call fans out to every participant through the media server, so the
+   * limit bounds how much traffic one moderator can generate. Loose enough that
+   * running a lively Q&A never hits it.
+   */
+  pollModeration: { limit: 60, windowMs: 60 * 1000 },
   startCall: { limit: 20, windowMs: 10 * 60 * 1000 },
 } as const satisfies Record<string, RateLimitRule>;
 

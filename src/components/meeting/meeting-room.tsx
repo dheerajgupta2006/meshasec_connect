@@ -50,7 +50,7 @@ function MeetingStage({
 
   return (
     <MeetingRolesProvider meetingCode={meetingCode}>
-    <MeetingPollsProvider>
+    <MeetingPollsProvider meetingCode={meetingCode}>
     {/* Captions themselves live in `CaptionsProvider` up in `CallProvider`; only
         the overlay is rendered here, because it belongs over the video grid. */}
     <div className="relative flex h-full w-full flex-col overflow-hidden bg-zinc-950 text-zinc-100">

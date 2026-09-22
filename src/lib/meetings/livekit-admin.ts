@@ -13,7 +13,7 @@ import "server-only";
  * module scope that other server code can reach.
  */
 
-import { RoomServiceClient } from "livekit-server-sdk";
+import { DataPacket_Kind, RoomServiceClient } from "livekit-server-sdk";
 
 export type AdminOutcome =
   | { ok: true }
@@ -233,6 +233,40 @@ export async function muteEveryoneElse(
         };
   } catch {
     return { ok: false, message: "We could not mute the room." };
+  }
+}
+
+/**
+ * Publishes a data message into the room as the server.
+ *
+ * The delivery property that matters is what the packet *lacks*. A browser's
+ * packet is stamped by the media server with the sender's identity, and there is
+ * no way for the sender to omit or change it. A packet published here carries no
+ * participant identity at all, so `livekit-client` surfaces it with an undefined
+ * sender. That is an unforgeable marker of server origin, and it is what lets
+ * clients accept moderation decisions — closing a poll, marking a question
+ * answered — without trusting the participant who asked for them.
+ *
+ * Reliable delivery, because these messages are state transitions rather than
+ * ephemeral signals: a dropped "poll closed" would leave voting open.
+ */
+export async function broadcastRoomData(
+  room: string,
+  topic: string,
+  payload: Uint8Array,
+): Promise<AdminOutcome> {
+  const service = client();
+
+  if (service === null) {
+    return { ok: false, message: NOT_CONFIGURED };
+  }
+
+  try {
+    // No `destinationIdentities`, so this reaches everyone currently connected.
+    await service.sendData(room, payload, DataPacket_Kind.RELIABLE, { topic });
+    return { ok: true };
+  } catch {
+    return { ok: false, message: "We could not reach the meeting room." };
   }
 }
 
