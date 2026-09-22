@@ -138,8 +138,16 @@ export interface PollsAuthority {
   origin: MessageOrigin;
   /**
    * LiveKit identities of the host and co-hosts, as read from the database by
-   * `getMeetingRoles`. Used to sanity-check the actor named in a moderation
-   * message and to decide whose snapshot is worth adopting.
+   * `getMeetingRoles`.
+   *
+   * Used for one thing only: deciding whose snapshot is worth adopting. It is
+   * deliberately *not* consulted for moderation messages. Those already arrive
+   * with server origin, which is the unforgeable part, and re-checking the actor
+   * against this list made every moderation message drop silently whenever the
+   * receiving client's roles had not loaded yet or a roles request had failed —
+   * the list is empty in both cases. A check that fails closed on a transient
+   * read is worse than no check, and it guarded almost nothing: anyone in the
+   * room can already see who the host is.
    */
   moderators: readonly string[];
 }
@@ -287,10 +295,9 @@ export function reducePolls(
     // --- Moderation. Server-published only. ---
 
     case "poll_launched": {
-      // Two gates. The packet must have arrived without a participant identity,
-      // which only the server can achieve, and the moderator it names must still
-      // hold the role according to the database.
-      if (origin.kind !== "server" || !isModerator(authority, message.by)) {
+      // The packet must have arrived without a participant identity, which only
+      // the server can achieve and which it only does after checking the role.
+      if (origin.kind !== "server") {
         return state;
       }
 
@@ -339,7 +346,7 @@ export function reducePolls(
     }
 
     case "poll_closed": {
-      if (origin.kind !== "server" || !isModerator(authority, message.by)) {
+      if (origin.kind !== "server") {
         return state;
       }
 
@@ -360,7 +367,7 @@ export function reducePolls(
     }
 
     case "question_answered": {
-      if (origin.kind !== "server" || !isModerator(authority, message.by)) {
+      if (origin.kind !== "server") {
         return state;
       }
 

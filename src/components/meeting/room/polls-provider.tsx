@@ -36,6 +36,9 @@ export interface PollsActionOutcome {
   message: string;
 }
 
+/** Applies a decision the server authorized and handed back. */
+type ApplyServerDecision = (message: PollsMessage) => void;
+
 interface PollsContextValue {
   state: PollsState;
   /** Null until the room is connected. */
@@ -255,6 +258,28 @@ export function MeetingPollsProvider({
     [localIdentity],
   );
 
+  /**
+   * Applies a moderation decision the server has already authorized and returned.
+   *
+   * Server origin is correct here: this *is* the server's decision, delivered by
+   * return value rather than over the data channel. Applying it means the
+   * moderator's panel updates even if their own copy of the broadcast never
+   * arrives, instead of showing a success toast next to an unchanged list.
+   * Receiving it twice is harmless — the reducer returns the same state when a
+   * question is already answered or a poll already closed.
+   */
+  const applyServerDecision = React.useCallback<ApplyServerDecision>(
+    (message) => {
+      setState((current) =>
+        reducePolls(current, message, {
+          origin: { kind: "server" },
+          moderators: moderatorsRef.current,
+        }),
+      );
+    },
+    [],
+  );
+
   // --- Composing -------------------------------------------------------------
 
   const draftPoll = React.useCallback(
@@ -314,38 +339,56 @@ export function MeetingPollsProvider({
       }
 
       try {
-        return await launchPollOnServer(meetingCode, {
+        const result = await launchPollOnServer(meetingCode, {
           id: draft.id,
           question: draft.question,
           options: draft.options,
         });
+
+        if (result.published !== undefined) {
+          applyServerDecision(result.published);
+        }
+
+        return { ok: result.ok, message: result.message };
       } catch {
         return { ok: false, message: "We could not launch that poll." };
       }
     },
-    [meetingCode],
+    [applyServerDecision, meetingCode],
   );
 
   const closePoll = React.useCallback(
     async (pollId: string): Promise<PollsActionOutcome> => {
       try {
-        return await closePollOnServer(meetingCode, pollId);
+        const result = await closePollOnServer(meetingCode, pollId);
+
+        if (result.published !== undefined) {
+          applyServerDecision(result.published);
+        }
+
+        return { ok: result.ok, message: result.message };
       } catch {
         return { ok: false, message: "We could not close that poll." };
       }
     },
-    [meetingCode],
+    [applyServerDecision, meetingCode],
   );
 
   const markAnswered = React.useCallback(
     async (questionId: string): Promise<PollsActionOutcome> => {
       try {
-        return await markAnsweredOnServer(meetingCode, questionId);
+        const result = await markAnsweredOnServer(meetingCode, questionId);
+
+        if (result.published !== undefined) {
+          applyServerDecision(result.published);
+        }
+
+        return { ok: result.ok, message: result.message };
       } catch {
         return { ok: false, message: "We could not update that question." };
       }
     },
-    [meetingCode],
+    [applyServerDecision, meetingCode],
   );
 
   // --- Open to everyone ------------------------------------------------------

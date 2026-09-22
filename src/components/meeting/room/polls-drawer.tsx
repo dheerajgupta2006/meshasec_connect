@@ -353,10 +353,10 @@ export function PollsDrawer({
           <Button
             type="button"
             size="sm"
-            variant="ghost"
+            variant="outline"
             disabled={pending}
             onClick={() => void moderate(poll.id, () => closePoll(poll.id))}
-            className="mt-2 h-7 w-full text-[11px] text-zinc-400 hover:text-zinc-100"
+            className="mt-2 h-7 w-full border-white/15 bg-white/[0.06] text-[11px] font-medium text-zinc-200 hover:bg-white/[0.14] hover:text-white"
           >
             {pending && (
               <LoaderCircle
@@ -607,7 +607,9 @@ export function PollsDrawer({
                   <button
                     type="button"
                     role="tab"
+                    id="qa-filter-open"
                     aria-selected={filter === "open"}
+                    aria-controls="qa-list"
                     onClick={() => setFilter("open")}
                     className={filterClass("open")}
                   >
@@ -616,7 +618,9 @@ export function PollsDrawer({
                   <button
                     type="button"
                     role="tab"
+                    id="qa-filter-answered"
                     aria-selected={filter === "answered"}
+                    aria-controls="qa-list"
                     onClick={() => setFilter("answered")}
                     className={filterClass("answered")}
                   >
@@ -624,10 +628,20 @@ export function PollsDrawer({
                   </button>
                 </div>
 
+                <div
+                  className="space-y-3"
+                  role="tabpanel"
+                  id="qa-list"
+                  aria-labelledby={
+                    filter === "open" ? "qa-filter-open" : "qa-filter-answered"
+                  }
+                >
                 {shownQuestions.length === 0 && (
                   <p className="py-8 text-center text-xs text-zinc-500">
                     {filter === "open"
-                      ? "No open questions. Ask the first one."
+                      ? answeredQuestions.length > 0
+                        ? "Everything has been answered. The rest are under Answered."
+                        : "No open questions. Ask the first one."
                       : "Nothing has been marked answered yet."}
                   </p>
                 )}
@@ -688,14 +702,14 @@ export function PollsDrawer({
                           <Button
                             type="button"
                             size="sm"
-                            variant="ghost"
+                            variant="outline"
                             disabled={pending}
                             onClick={() =>
                               void moderate(item.id, () =>
                                 markAnswered(item.id),
                               )
                             }
-                            className="h-7 px-2 text-[11px] text-zinc-400 hover:text-emerald-300"
+                            className="h-7 border-emerald-400/30 bg-emerald-500/10 px-2 text-[11px] font-medium text-emerald-200 hover:border-emerald-400/50 hover:bg-emerald-500/20 hover:text-emerald-100"
                           >
                             {pending ? (
                               <LoaderCircle
@@ -715,6 +729,7 @@ export function PollsDrawer({
                     </div>
                   );
                 })}
+                </div>
               </div>
             )}
           </div>

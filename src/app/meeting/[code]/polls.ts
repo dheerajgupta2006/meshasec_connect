@@ -39,6 +39,18 @@ import { consumeRateLimit, describeRetryAfter } from "@/lib/rate-limit";
 export interface PollsActionResult {
   ok: boolean;
   message: string;
+  /**
+   * The message that was actually published, returned so the caller can apply it
+   * without waiting for its own copy of the broadcast.
+   *
+   * The moderator's view should not hinge on a packet round-tripping back to the
+   * client that triggered it. If it does, a dropped packet leaves them looking at
+   * a success toast and an unchanged panel, which is indistinguishable from the
+   * action having been refused. The server has already authorized the change at
+   * this point, so applying it locally is not a trust shortcut — it is the same
+   * decision, delivered by return value instead of over the wire.
+   */
+  published?: PollsMessage;
 }
 
 /**
@@ -67,7 +79,7 @@ async function publish(
   const outcome = await broadcastRoomData(meetingCode, POLLS_TOPIC, payload);
 
   return outcome.ok
-    ? { ok: true, message: "" }
+    ? { ok: true, message: "", published: message }
     : { ok: false, message: outcome.message };
 }
 
@@ -164,7 +176,7 @@ export async function launchPoll(
   });
 
   return sent.ok
-    ? { ok: true, message: "Poll is live." }
+    ? { ok: true, message: "Poll is live.", published: sent.published }
     : { ok: false, message: sent.message };
 }
 
@@ -190,7 +202,7 @@ export async function closePoll(
   });
 
   return sent.ok
-    ? { ok: true, message: "Poll closed." }
+    ? { ok: true, message: "Poll closed.", published: sent.published }
     : { ok: false, message: sent.message };
 }
 
@@ -216,6 +228,6 @@ export async function markQuestionAnswered(
   });
 
   return sent.ok
-    ? { ok: true, message: "Marked answered." }
+    ? { ok: true, message: "Marked answered.", published: sent.published }
     : { ok: false, message: sent.message };
 }

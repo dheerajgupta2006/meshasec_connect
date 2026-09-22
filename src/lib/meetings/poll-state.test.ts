@@ -215,20 +215,6 @@ describe("moderation requires the server as the sender", () => {
     ).toBe(state);
   });
 
-  it("refuses a server message naming someone who does not moderate", () => {
-    // Defence in depth: recipients re-check the actor against the roles they read
-    // from the database rather than taking the payload's word for it.
-    const state = withQuestion(question());
-
-    expect(
-      reducePolls(
-        state,
-        { kind: "question_answered", questionId: "q1", by: A },
-        fromServer(),
-      ),
-    ).toBe(state);
-  });
-
   it("accepts a co-host as the actor", () => {
     const next = reducePolls(
       withQuestion(question()),
@@ -239,17 +225,39 @@ describe("moderation requires the server as the sender", () => {
     expect(next.questions[0]?.answered).toBe(true);
   });
 
-  it("refuses everything once the actor has lost the role", () => {
-    // A stale packet from a demoted co-host must not still land.
-    const state = withPoll(poll());
+  it("applies a moderation message even when the receiver knows of no moderators", () => {
+    // Regression. Moderation used to require the actor to appear in the roles the
+    // receiving client had polled, which is an empty list until the first
+    // `getMeetingRoles` resolves and after any failed read. The server had already
+    // authorized the change and reported success, so the effect was a success
+    // toast beside a panel that never updated.
+    const next = reducePolls(
+      withQuestion(question()),
+      { kind: "question_answered", questionId: "q1", by: HOST },
+      fromServer([]),
+    );
 
-    expect(
-      reducePolls(
-        state,
-        { kind: "poll_closed", pollId: "poll1", by: CO_HOST },
-        fromServer([HOST]),
-      ),
-    ).toBe(state);
+    expect(next.questions[0]?.answered).toBe(true);
+  });
+
+  it("closes a poll even when the receiver knows of no moderators", () => {
+    const next = reducePolls(
+      withPoll(poll()),
+      { kind: "poll_closed", pollId: "poll1", by: HOST },
+      fromServer([]),
+    );
+
+    expect(next.polls[0]?.status).toBe("closed");
+  });
+
+  it("launches a poll even when the receiver knows of no moderators", () => {
+    const next = reducePolls(
+      EMPTY_POLLS_STATE,
+      { kind: "poll_launched", poll: poll(), by: HOST },
+      fromServer([]),
+    );
+
+    expect(next.polls[0]?.status).toBe("live");
   });
 });
 
