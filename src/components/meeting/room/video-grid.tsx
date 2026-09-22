@@ -19,6 +19,7 @@ import {
   trackReferenceKey,
 } from "./participant-tile";
 import { useMeetingRoles } from "./roles-provider";
+import { ScreenShareViewport } from "./screen-share-viewport";
 
 export type LayoutMode = "gallery" | "speaker";
 
@@ -216,13 +217,38 @@ export function VideoGrid({ layout, className }: VideoGridProps): React.JSX.Elem
       (trackRef) => trackReferenceKey(trackRef) !== spotlightKey,
     );
 
+    /**
+     * A spotlit screen share gets the zoomable viewport instead of a plain tile.
+     *
+     * Narrowed here rather than inside the viewport so the component can require a
+     * real `TrackReference`: its zoom maths reads the decoded resolution off the
+     * video element, which a placeholder has no way to provide.
+     */
+    const screenShareSpotlight =
+      spotlight.source === Track.Source.ScreenShare &&
+      isTrackReference(spotlight)
+        ? spotlight
+        : null;
+
     return (
       <div className={cn("flex min-h-0 min-w-0 flex-col gap-3", className)}>
         {/* `min-w-0` matters in a flex column: without it a wide screen share can
             set the flex item's min-content width and push the row past the
-            viewport, which no amount of zooming out fixes. */}
+            viewport, which no amount of zooming out fixes.
+            `overflow-hidden` stays even though the viewport below scrolls its own
+            content — it is the backstop that keeps a zoomed share from ever
+            reaching the page. */}
         <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
-          {renderTile(spotlight, "spotlight")}
+          {screenShareSpotlight === null ? (
+            renderTile(spotlight, "spotlight")
+          ) : (
+            <ScreenShareViewport
+              trackRef={screenShareSpotlight}
+              isHost={
+                screenShareSpotlight.participant.identity === hostIdentity
+              }
+            />
+          )}
         </div>
 
         {thumbnails.length > 0 && (
