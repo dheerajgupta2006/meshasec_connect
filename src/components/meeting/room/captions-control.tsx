@@ -56,6 +56,7 @@ export function CaptionsPanel() {
     canCaption,
     canTranslate,
     canSpeak,
+    hasCloudVoices,
     isCaptioning,
     dictationState,
     failure,
@@ -72,6 +73,32 @@ export function CaptionsPanel() {
     setMuteOriginal,
     isPreparing,
   } = useCaptions();
+
+  /** Catalogue languages that cannot be spoken here, so the gap can be named. */
+  const missingLanguages = SUPPORTED_LANGUAGES.filter(
+    (language) => !speakableLanguages.includes(language.code),
+  );
+
+  /**
+   * Names a few of the missing languages rather than only counting them.
+   *
+   * "No voice for Telugu, Kannada and 12 more" tells somebody whether the
+   * language *they* want is the problem; a bare count does not.
+   */
+  const missingSummary = (() => {
+    const named = missingLanguages
+      .slice(0, 3)
+      .map((language) => language.englishName);
+    const rest = missingLanguages.length - named.length;
+
+    if (rest > 0) {
+      return `${named.join(", ")} and ${rest} more`;
+    }
+
+    return named.length > 1
+      ? `${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}`
+      : named.join("");
+  })();
 
   return (
     <div className="w-[264px] space-y-4 p-1">
@@ -162,8 +189,27 @@ export function CaptionsPanel() {
         ) : (
           <p className="text-[11px] leading-4 text-zinc-400">
             {canSpeak
-              ? "No speech voices are installed on this device. Add a language with text-to-speech in your system settings to hear translations spoken."
+              ? "Nothing can be read aloud here yet."
               : "This browser cannot speak text aloud."}
+          </p>
+        )}
+
+        {/* Explains an absence the user would otherwise read as a missing
+            feature. Voices come from the operating system and browser, not from
+            this app, and Windows ships none for most Indian languages — but Edge
+            carries a much wider set at no cost and needs nothing installed. */}
+        {/* Explains an absence that otherwise reads as a broken feature.
+            Voices come from the device or the server, never from this app, and
+            Windows ships none for most Indian languages.
+
+            The Edge suggestion appears only while the server has no voices of
+            its own, so configuring server-side synthesis retires this notice
+            automatically rather than leaving stale advice on screen. */}
+        {canSpeak && missingLanguages.length > 0 && (
+          <p className="text-[11px] leading-4 text-zinc-400">
+            No voice on this device for {missingSummary}.
+            {!hasCloudVoices &&
+              " Microsoft Edge carries voices for most of these, including the Indian languages, with nothing to install."}
           </p>
         )}
 

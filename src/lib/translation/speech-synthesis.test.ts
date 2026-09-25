@@ -185,9 +185,15 @@ describe("pickVoice", () => {
   });
 });
 
-describe("unsupported browser", () => {
+describe("no route at all", () => {
   it("reports itself unsupported and speaks nothing", () => {
-    const controller = createSpeechController({ synthesis: null });
+    // Both routes disabled: no local voices *and* no server. Either one alone is
+    // enough to be supported, so unsupported means genuinely nothing available.
+    const controller = createSpeechController({
+      synthesis: null,
+      fetchAudio: null,
+      playAudio: null,
+    });
 
     expect(controller.isSupported()).toBe(false);
     expect(controller.speakableLanguages()).toEqual([]);
@@ -507,5 +513,250 @@ describe("stop", () => {
     const fake = harness();
 
     expect(() => controllerFor(fake).stop()).not.toThrow();
+  });
+});
+
+describe("server-side synthesis", () => {
+  /** A device with no voices at all, which is the case this path exists for. */
+  function cloudOnlyHarness(options: { failFetch?: boolean; failPlay?: boolean } = {}) {
+    const fetched: { text: string; language: string }[] = [];
+    const played: string[] = [];
+    let clock = 1000;
+
+    const controller = createSpeechController({
+      synthesis: null,
+      now: () => clock,
+      fetchAudio: async (text, language) => {
+        fetched.push({ text, language });
+
+        return options.failFetch === true ? null : `blob:${text}`;
+      },
+      playAudio: async (url) => {
+        if (options.failPlay === true) {
+          throw new Error("playback failed");
+        }
+
+        played.push(url);
+      },
+    });
+
+    return {
+      controller,
+      fetched,
+      played,
+      advance: (ms: number) => {
+        clock += ms;
+      },
+    };
+  }
+
+  it("reports itself supported with no local voices at all", () => {
+    // Playing audio needs no installed voice, which is the entire point.
+    const { controller } = cloudOnlyHarness();
+
+    expect(controller.isSupported()).toBe(true);
+  });
+
+  it("offers no languages until the server says what it can speak", () => {
+    const { controller } = cloudOnlyHarness();
+
+    expect(controller.speakableLanguages()).toEqual([]);
+  });
+
+  it("offers a language the device cannot speak once the server can", () => {
+    // Windows has no Telugu voice, so without this Telugu is unreachable.
+    const { controller } = cloudOnlyHarness();
+
+    controller.setCloudLanguages(["te", "kn"]);
+
+    expect(controller.speakableLanguages().sort()).toEqual(["kn", "te"]);
+  });
+
+  it("notifies listeners when the server's languages arrive", () => {
+    const { controller } = cloudOnlyHarness();
+    let notified = 0;
+
+    controller.onVoicesReady(() => {
+      notified += 1;
+    });
+
+    controller.setCloudLanguages(["te"]);
+
+    expect(notified).toBe(1);
+  });
+
+  it("fetches and plays a clip", async () => {
+    const { controller, fetched, played } = cloudOnlyHarness();
+
+    controller.setCloudLanguages(["te"]);
+    controller.enqueue("రేపు కలుద్దాం", "te", "alice");
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fetched).toEqual([{ text: "రేపు కలుద్దాం", language: "te" }]);
+    expect(played).toEqual(["blob:రేపు కలుద్దాం"]);
+  });
+
+  it("drops a language the server cannot speak either", async () => {
+    const { controller, fetched } = cloudOnlyHarness();
+
+    controller.setCloudLanguages(["te"]);
+    controller.enqueue("hello", "ta", "alice");
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fetched).toEqual([]);
+  });
+
+  it("keeps draining when a fetch returns nothing", async () => {
+    const { controller, fetched } = cloudOnlyHarness({ failFetch: true });
+
+    controller.setCloudLanguages(["te"]);
+    controller.enqueue("first", "te", "alice");
+    controller.enqueue("second", "te", "alice");
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // A failed clip costs one sentence, never the queue.
+    expect(fetched.map((item) => item.text)).toEqual(["first", "second"]);
+  });
+
+  it("keeps draining when playback throws", async () => {
+    const { controller, fetched } = cloudOnlyHarness({ failPlay: true });
+
+    controller.setCloudLanguages(["te"]);
+    controller.enqueue("first", "te", "alice");
+    controller.enqueue("second", "te", "alice");
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fetched.map((item) => item.text)).toEqual(["first", "second"]);
+  });
+
+  it("plays one clip at a time", async () => {
+    // Marked active before the fetch, so a burst cannot start overlapping
+    // requests and then talk over each other.
+    const { controller, fetched } = cloudOnlyHarness();
+
+    controller.setCloudLanguages(["te"]);
+    controller.enqueue("first", "te", "alice");
+    controller.enqueue("second", "te", "alice");
+
+    expect(fetched.map((item) => item.text)).toEqual(["first"]);
+  });
+
+  it("reports the speaker so the original can be ducked", async () => {
+    const { controller } = cloudOnlyHarness();
+    const started: string[] = [];
+
+    controller.setEvents({ onStart: (speaker) => started.push(speaker) });
+    controller.setCloudLanguages(["te"]);
+    controller.enqueue("hello", "te", "alice");
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(started).toEqual(["alice"]);
+  });
+
+  it("skips a stale clip rather than fetching it", async () => {
+    const { controller, fetched, advance } = cloudOnlyHarness();
+
+    controller.setCloudLanguages(["te"]);
+    controller.enqueue("current", "te", "alice");
+    controller.enqueue("will go stale", "te", "alice");
+
+    advance(MAX_UTTERANCE_AGE_MS + 1);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Never billed for audio nobody should hear.
+    expect(fetched.map((item) => item.text)).toEqual(["current"]);
+  });
+
+  it("prefers a local voice over the server when both exist", async () => {
+    // Local is free and instant, so the server is strictly a fallback.
+    const fetched: string[] = [];
+    const fake = harness([voice("hi-IN")]);
+
+    const controller = createSpeechController({
+      synthesis: fake.synthesis,
+      createUtterance: fake.createUtterance,
+      now: fake.now,
+      fetchAudio: async (text) => {
+        fetched.push(text);
+        return `blob:${text}`;
+      },
+      playAudio: async () => undefined,
+    });
+
+    controller.setCloudLanguages(["hi"]);
+    controller.enqueue("नमस्ते", "hi", "alice");
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fake.spoken.map((item) => item.text)).toEqual(["नमस्ते"]);
+    expect(fetched).toEqual([]);
+  });
+
+  it("uses the server for a language the local voices miss", async () => {
+    const fetched: string[] = [];
+    const fake = harness([voice("hi-IN")]);
+
+    const controller = createSpeechController({
+      synthesis: fake.synthesis,
+      createUtterance: fake.createUtterance,
+      now: fake.now,
+      fetchAudio: async (text) => {
+        fetched.push(text);
+        return `blob:${text}`;
+      },
+      playAudio: async () => undefined,
+    });
+
+    controller.setCloudLanguages(["te"]);
+    controller.enqueue("రేపు", "te", "alice");
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fake.spoken).toEqual([]);
+    expect(fetched).toEqual(["రేపు"]);
+  });
+
+  it("combines local and server languages in the picker", () => {
+    const fake = harness([voice("hi-IN"), voice("en-US")]);
+
+    const controller = createSpeechController({
+      synthesis: fake.synthesis,
+      createUtterance: fake.createUtterance,
+      now: fake.now,
+      fetchAudio: async () => null,
+      playAudio: async () => undefined,
+    });
+
+    controller.setCloudLanguages(["te", "kn"]);
+
+    expect(controller.speakableLanguages().sort()).toEqual([
+      "en",
+      "hi",
+      "kn",
+      "te",
+    ]);
+  });
+
+  it("falls back to local only when there is no server route", () => {
+    const fake = harness([voice("hi-IN")]);
+
+    const controller = createSpeechController({
+      synthesis: fake.synthesis,
+      createUtterance: fake.createUtterance,
+      now: fake.now,
+      fetchAudio: null,
+      playAudio: null,
+    });
+
+    controller.setCloudLanguages(["te"]);
+
+    // Declaring a cloud language must not make it selectable with no way to play.
+    expect(controller.speakableLanguages()).toEqual(["hi"]);
   });
 });

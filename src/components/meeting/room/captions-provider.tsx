@@ -171,6 +171,15 @@ interface CaptionsContextValue {
   /** False when this browser cannot synthesise speech at all. */
   canSpeak: boolean;
   /**
+   * Whether the server can synthesise languages this device cannot.
+   *
+   * False until Azure credentials are configured. The listen panel uses it to
+   * decide whether a missing language is worth explaining: with no server route,
+   * the honest advice is to use a browser that carries more voices, and that
+   * advice should disappear on its own once the server can cover them.
+   */
+  hasCloudVoices: boolean;
+  /**
    * Whether to silence the original voice entirely while dubbing.
    *
    * On by default, which is what makes this a dub rather than an echo: dubbing
@@ -263,6 +272,7 @@ export function CaptionsProvider({
     readonly LanguageCode[]
   >([]);
   const [canSpeak, setCanSpeak] = React.useState(false);
+  const [hasCloudVoices, setHasCloudVoices] = React.useState(false);
   const [muteOriginal, setMuteOriginalState] = React.useState(true);
   const [isPreparing, setIsPreparing] = React.useState(false);
   const [translations, setTranslations] = React.useState<
@@ -316,9 +326,44 @@ export function CaptionsProvider({
 
     // Chrome returns an empty voice list on first call and fills it in later, so
     // the picker has to be rebuilt when that happens or it stays empty forever.
+    // The same listener covers the server's languages arriving.
     const unsubscribe = speech.onVoicesReady(() => {
       setSpeakableLanguages(speech.speakableLanguages());
     });
+
+    /**
+     * Asks the server which languages it can synthesise.
+     *
+     * This is what makes dubbing work in any browser: Windows ships no Telugu,
+     * Kannada, Marathi or Malayalam voice, so without a server route those
+     * languages are unreachable on Chrome no matter what the app does. A failure
+     * here is silent and simply leaves the local voices as the whole offering.
+     */
+    void (async () => {
+      try {
+        const response = await fetch("/api/tts", { cache: "no-store" });
+
+        if (!response.ok) {
+          return;
+        }
+
+        const payload: unknown = await response.json();
+        const languages =
+          typeof payload === "object" &&
+          payload !== null &&
+          Array.isArray((payload as { languages?: unknown }).languages)
+            ? (payload as { languages: unknown[] }).languages.filter(
+                isLanguageCode,
+              )
+            : [];
+
+        speech.setCloudLanguages(languages);
+        setHasCloudVoices(languages.length > 0);
+        setSpeakableLanguages(speech.speakableLanguages());
+      } catch {
+        // Offline, or synthesis is not configured. Local voices still work.
+      }
+    })();
 
     setSpeakLanguageState(readStoredLanguage(SPEAK_STORAGE_KEY) ?? DEFAULT_LANGUAGE);
     setReadLanguageState(readStoredLanguage(READ_STORAGE_KEY));
@@ -990,6 +1035,7 @@ export function CaptionsProvider({
       setListenLanguage,
       speakableLanguages,
       canSpeak,
+      hasCloudVoices,
       muteOriginal,
       setMuteOriginal,
       isPreparing,
@@ -1012,6 +1058,7 @@ export function CaptionsProvider({
       setListenLanguage,
       speakableLanguages,
       canSpeak,
+      hasCloudVoices,
       muteOriginal,
       setMuteOriginal,
       isPreparing,

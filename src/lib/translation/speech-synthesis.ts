@@ -172,6 +172,7 @@ export function pickVoice(
 
 interface QueuedUtterance {
   text: string;
+  language: LanguageCode;
   locale: string;
   queuedAt: number;
   /** Identity of whoever said it, so callers can duck that participant. */
@@ -185,16 +186,38 @@ export interface SpeechEvents {
   onIdle?: () => void;
 }
 
+/** Fetches synthesised audio from the server, or null when it cannot. */
+export type AudioFetcher = (
+  text: string,
+  language: LanguageCode,
+) => Promise<string | null>;
+
+/** Plays an audio URL to completion. Rejecting is treated as a skipped line. */
+export type AudioPlayer = (url: string) => Promise<void>;
+
 export interface SpeechController {
-  /** False when this browser cannot synthesise speech at all. */
+  /**
+   * False when this browser can neither synthesise speech locally nor play
+   * audio from the server.
+   */
   isSupported(): boolean;
   /**
-   * Catalogue languages this device has a voice for.
+   * Catalogue languages that can be spoken, from a local voice or the server.
    *
-   * The list a picker should be built from. Empty until the voice list has
-   * loaded — see `onVoicesReady`.
+   * The list a picker should be built from. Local voices are empty until the
+   * browser has loaded them — see `onVoicesReady`.
    */
   speakableLanguages(): LanguageCode[];
+  /**
+   * Declares which languages the server can synthesise.
+   *
+   * Discovered asynchronously after mount, which is why it is set rather than
+   * passed in. Languages here become speakable even when the device has no voice
+   * of its own, which is the entire point: Windows ships no Telugu, Kannada,
+   * Marathi or Malayalam voice, so on Chrome those languages are otherwise
+   * unreachable no matter what this app does.
+   */
+  setCloudLanguages(languages: readonly LanguageCode[]): void;
   /**
    * Registers a callback for when the voice list becomes available.
    *
@@ -215,6 +238,54 @@ export interface SpeechOptions {
   synthesis?: SynthesisLike | null;
   createUtterance?: UtteranceFactory;
   now?: () => number;
+  /** Server-side synthesis, used only for languages the device cannot speak. */
+  fetchAudio?: AudioFetcher | null;
+  playAudio?: AudioPlayer | null;
+}
+
+/** Requests synthesised audio from this app's own endpoint. */
+function defaultFetchAudio(): AudioFetcher {
+  return async (text, language) => {
+    try {
+      const response = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, language }),
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+
+      // An object URL rather than a data URL: the clip is handed straight to an
+      // `Audio` element without being base64-inflated through a string first.
+      return URL.createObjectURL(await response.blob());
+    } catch {
+      return null;
+    }
+  };
+}
+
+/** Plays a clip through an `Audio` element, releasing the URL afterwards. */
+function defaultPlayAudio(): AudioPlayer {
+  return (url) =>
+    new Promise<void>((resolve, reject) => {
+      const audio = new Audio(url);
+
+      const done = (settle: () => void) => () => {
+        // Revoked on both paths: an object URL held forever is a memory leak that
+        // grows with every sentence spoken.
+        URL.revokeObjectURL(url);
+        settle();
+      };
+
+      audio.onended = done(resolve);
+      audio.onerror = done(() => reject(new Error("playback failed")));
+
+      void audio.play().catch(
+        done(() => reject(new Error("playback rejected"))),
+      );
+    });
 }
 
 export function createSpeechController(
@@ -233,9 +304,21 @@ export function createSpeechController(
 
   const now = options.now ?? (() => Date.now());
 
+  const fetchAudio =
+    options.fetchAudio === undefined ? defaultFetchAudio() : options.fetchAudio;
+
+  const playAudio =
+    options.playAudio === undefined ? defaultPlayAudio() : options.playAudio;
+
   let events: SpeechEvents = {};
   const queue: QueuedUtterance[] = [];
   let active = false;
+
+  /** Languages the server can cover. Set once discovered. */
+  let cloudLanguages: readonly LanguageCode[] = [];
+
+  /** True when a clip can be fetched and played, whatever the device has. */
+  const canUseCloud = fetchAudio !== null && playAudio !== null;
 
   /** Cached so a picker does not re-scan the voice list on every render. */
   let voices: readonly VoiceLike[] = synthesis?.getVoices() ?? [];
@@ -250,7 +333,7 @@ export function createSpeechController(
   }
 
   function drain(): void {
-    if (synthesis === null || createUtterance === null || active) {
+    if (active) {
       return;
     }
 
@@ -268,9 +351,29 @@ export function createSpeechController(
       return;
     }
 
-    const voice = pickVoice(voices, next.locale);
+    const voice =
+      synthesis === null || createUtterance === null
+        ? null
+        : pickVoice(voices, next.locale);
 
-    if (voice === null) {
+    // A local voice is always preferred: it is free, starts instantly and works
+    // offline. The server is only for languages the device cannot speak at all.
+    if (voice !== null) {
+      speakLocally(next, voice);
+      return;
+    }
+
+    if (canUseCloud && cloudLanguages.includes(next.language)) {
+      void speakFromServer(next);
+      return;
+    }
+
+    drain();
+  }
+
+  /** Runs one utterance through the browser's own synthesiser. */
+  function speakLocally(next: QueuedUtterance, voice: VoiceLike): void {
+    if (synthesis === null || createUtterance === null) {
       drain();
       return;
     }
@@ -311,6 +414,51 @@ export function createSpeechController(
     }
   }
 
+  /**
+   * Fetches a clip from the server and plays it.
+   *
+   * This is what makes dubbing browser-independent: playing audio needs no
+   * installed voice, so a Chrome user on Windows can hear Telugu even though
+   * Windows has no Telugu voice.
+   *
+   * Marked active before the fetch so a burst of captions cannot start several
+   * overlapping requests and then talk over each other.
+   */
+  async function speakFromServer(next: QueuedUtterance): Promise<void> {
+    if (fetchAudio === null || playAudio === null) {
+      drain();
+      return;
+    }
+
+    active = true;
+
+    try {
+      events.onStart?.(next.speaker);
+    } catch {
+      // Ducking is a nicety; speaking is the point.
+    }
+
+    try {
+      const url = await fetchAudio(next.text, next.language);
+
+      // Re-checked after the round trip: the listener may have turned dubbing off
+      // while this was in flight, and `stop` clears the queue but cannot cancel a
+      // fetch already awaiting.
+      if (url === null) {
+        active = false;
+        drain();
+        return;
+      }
+
+      await playAudio(url);
+    } catch {
+      // A failed clip costs one sentence, not the queue.
+    } finally {
+      active = false;
+      drain();
+    }
+  }
+
   /** Notifies idle without letting a consumer's throw break the queue. */
   function notifyIdle(): void {
     try {
@@ -322,29 +470,42 @@ export function createSpeechController(
 
   return {
     isSupported(): boolean {
-      return synthesis !== null && createUtterance !== null;
+      // Either route is enough. Audio playback needs no installed voice, which is
+      // exactly why the server path exists.
+      return (synthesis !== null && createUtterance !== null) || canUseCloud;
     },
 
     speakableLanguages(): LanguageCode[] {
-      if (synthesis === null) {
-        return [];
-      }
-
       // Re-read rather than trusting the cache: Chrome populates the list lazily
       // and does not always fire the event before the first query.
-      if (voices.length === 0) {
+      if (synthesis !== null && voices.length === 0) {
         voices = synthesis.getVoices();
       }
 
       const result: LanguageCode[] = [];
 
       SUPPORTED_LANGUAGES.forEach((language) => {
-        if (pickVoice(voices, speechLocaleFor(language.code)) !== null) {
+        const hasLocal =
+          synthesis !== null &&
+          createUtterance !== null &&
+          pickVoice(voices, speechLocaleFor(language.code)) !== null;
+
+        const hasCloud = canUseCloud && cloudLanguages.includes(language.code);
+
+        if (hasLocal || hasCloud) {
           result.push(language.code);
         }
       });
 
       return result;
+    },
+
+    setCloudLanguages(languages: readonly LanguageCode[]): void {
+      cloudLanguages = languages;
+
+      // The picker is built from `speakableLanguages`, so it has to be told the
+      // set just grew.
+      voiceListeners.forEach((listener) => listener());
     },
 
     onVoicesReady(listener: () => void): () => void {
@@ -356,10 +517,6 @@ export function createSpeechController(
     },
 
     enqueue(text: string, language: LanguageCode, speaker: string): void {
-      if (synthesis === null || createUtterance === null) {
-        return;
-      }
-
       const cleaned = text.trim();
 
       if (cleaned.length === 0) {
@@ -368,13 +525,20 @@ export function createSpeechController(
 
       const locale = speechLocaleFor(language);
 
-      // Nothing installed for this language. Dropped quietly: the caller should
-      // not have offered it, and a thrown error mid-call helps nobody.
-      if (pickVoice(voices, locale) === null) {
+      const hasLocal =
+        synthesis !== null &&
+        createUtterance !== null &&
+        pickVoice(voices, locale) !== null;
+
+      const hasCloud = canUseCloud && cloudLanguages.includes(language);
+
+      // No route for this language. Dropped quietly: the caller should not have
+      // offered it, and throwing mid-call helps nobody.
+      if (!hasLocal && !hasCloud) {
         return;
       }
 
-      queue.push({ text: cleaned, locale, queuedAt: now(), speaker });
+      queue.push({ text: cleaned, language, locale, queuedAt: now(), speaker });
 
       // Drops the oldest *unspoken* utterance. The one being spoken is untouched,
       // because cutting a sentence off mid-word to start another is worse than
