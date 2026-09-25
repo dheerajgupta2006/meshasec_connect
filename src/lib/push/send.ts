@@ -77,7 +77,26 @@ export interface MessagePushPayload {
   preview: string;
 }
 
-export type PushPayload = CallPushPayload | MessagePushPayload;
+/**
+ * A message sent to a group.
+ *
+ * A separate variant rather than reusing `message`, because the service worker
+ * derives the notification's destination from the payload: a `message` becomes
+ * `/messages/{fromUsername}`, which for a group message would open a one-to-one
+ * thread with whoever happened to write it.
+ */
+export interface GroupMessagePushPayload {
+  kind: "group_message";
+  groupId: string;
+  groupName: string;
+  fromName: string;
+  preview: string;
+}
+
+export type PushPayload =
+  | CallPushPayload
+  | MessagePushPayload
+  | GroupMessagePushPayload;
 
 /**
  * A push service reporting the subscription is dead.

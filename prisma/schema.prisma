@@ -31,17 +31,20 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  hostedMeetings   Meeting[]           @relation("MeetingHost")
-  participations   Participant[]
-  sentRequests     ConnectionRequest[] @relation("ConnectionSender")
-  receivedRequests ConnectionRequest[] @relation("ConnectionReceiver")
-  sentMessages     DirectMessage[]     @relation("MessageSender")
-  receivedMessages DirectMessage[]     @relation("MessageReceiver")
-  sentCallInvites     CallInvite[]     @relation("CallInviteSender")
-  receivedCallInvites CallInvite[]     @relation("CallInviteReceiver")
-  waitingRoomEntries  WaitingRoomEntry[] @relation("WaitingGuest")
-  currentlyHosting    Meeting[]          @relation("MeetingCurrentHost")
+  hostedMeetings      Meeting[]           @relation("MeetingHost")
+  participations      Participant[]
+  sentRequests        ConnectionRequest[] @relation("ConnectionSender")
+  receivedRequests    ConnectionRequest[] @relation("ConnectionReceiver")
+  sentMessages        DirectMessage[]     @relation("MessageSender")
+  receivedMessages    DirectMessage[]     @relation("MessageReceiver")
+  sentCallInvites     CallInvite[]        @relation("CallInviteSender")
+  receivedCallInvites CallInvite[]        @relation("CallInviteReceiver")
+  waitingRoomEntries  WaitingRoomEntry[]  @relation("WaitingGuest")
+  currentlyHosting    Meeting[]           @relation("MeetingCurrentHost")
   pushSubscriptions   PushSubscription[]
+  ownedGroups         Group[]             @relation("GroupOwner")
+  groupMemberships    GroupMember[]
+  sentGroupMessages   GroupMessage[]      @relation("GroupMessageSender")
 }
 
 /// A browser's push endpoint, so a call can reach someone whose tab is closed.
@@ -56,13 +59,13 @@ model PushSubscription {
   /// re-subscribing the same browser must update rather than duplicate.
   endpoint String @unique
   /// Public key from the browser's keypair, used to encrypt the payload.
-  p256dh String
-  auth   String
+  p256dh   String
+  auth     String
 
   /// Kept for diagnostics only; never used to decide anything.
   userAgent String?
 
-  createdAt DateTime @default(now())
+  createdAt  DateTime  @default(now())
   /// Bumped on every successful send, so dead endpoints are identifiable.
   lastUsedAt DateTime?
 
@@ -127,10 +130,10 @@ model LinkPreview {
   siteName     String?
 
   /// Set on a successful scrape. Null means every attempt so far has failed.
-  fetchedAt DateTime?
+  fetchedAt     DateTime?
   /// Set when the most recent attempt failed. Failures are cached too, so a dead
   /// or hostile link is not re-fetched on every render.
-  failedAt DateTime?
+  failedAt      DateTime?
   /// Kept for diagnostics; never shown to a user.
   failureReason String?
 
@@ -167,10 +170,10 @@ model MeetingGuestBan {
 /// loosening that would put a null check into the middle of the signed-in
 /// admission path for the benefit of a case it never handles.
 model GuestWaitingEntry {
-  id        String @id @default(cuid())
-  meetingId String
+  id          String @id @default(cuid())
+  meetingId   String
   /// From the guest's signed session token. Not a user id.
-  guestId String
+  guestId     String
   /// Shown to the host in the admit queue, since there is no profile to read.
   displayName String
 
@@ -201,12 +204,12 @@ enum KnockStatus {
 /// anyone with the link write themselves into attendance history and bypass the
 /// admission check on a later rejoin.
 model WaitingRoomEntry {
-  id        String      @id @default(cuid())
-  meetingId String
-  userId    String
-  status    KnockStatus @default(PENDING)
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
+  id          String      @id @default(cuid())
+  meetingId   String
+  userId      String
+  status      KnockStatus @default(PENDING)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
   /// Who answered. Null while pending.
   decidedById String?
 
@@ -240,17 +243,17 @@ model ConnectionRequest {
 }
 
 model Meeting {
-  id              String                  @id @default(cuid())
-  title           String
-  hostId          String
-  meetingCode     String                  @unique
-  createdAt       DateTime                @default(now())
-  startsAt        DateTime?
-  endsAt          DateTime?
+  id                 String                  @id @default(cuid())
+  title              String
+  hostId             String
+  meetingCode        String                  @unique
+  createdAt          DateTime                @default(now())
+  startsAt           DateTime?
+  endsAt             DateTime?
   /// PRIVATE meetings admit only the host and enrolled participants, so a
   /// leaked code is not enough to join. Direct 1-on-1 calls are private; a
   /// meeting created to be shared by link is not.
-  isPrivate       Boolean                 @default(false)
+  isPrivate          Boolean                 @default(false)
   /// Six-digit room PIN for guests who are not enrolled participants.
   ///
   /// Stored in the clear on purpose: the host UI has to *display* it to share
@@ -258,13 +261,13 @@ model Meeting {
   /// not a credential — admission still requires a signed-in Clerk session, and
   /// `authorizeMeetingJoin` rate limits attempts so six digits cannot be walked.
   /// Nullable because meetings created before this column existed have none.
-  passcode        String?
+  passcode           String?
   /// When true, nobody new may mint a token. Existing participants are
   /// unaffected, so locking does not eject the people already talking.
-  isLocked        Boolean                 @default(false)
+  isLocked           Boolean                 @default(false)
   /// When true, a non-participant who clears the passcode is placed in the
   /// waiting room instead of being admitted, and needs the host to let them in.
-  waitingRoomEnabled Boolean              @default(false)
+  waitingRoomEnabled Boolean                 @default(false)
   /// Whoever is running the meeting right now.
   ///
   /// Separate from `hostId`, which records who created it and never changes —
@@ -273,18 +276,27 @@ model Meeting {
   /// talking, it transfers to the longest-present participant so the room is
   /// never left without moderation. Null means nobody has taken over, so the
   /// creator is still the acting host.
-  currentHostId   String?
-  currentHost     User?                   @relation("MeetingCurrentHost", fields: [currentHostId], references: [id], onDelete: SetNull)
-  host            User                    @relation("MeetingHost", fields: [hostId], references: [id], onDelete: Cascade)
-  participants    Participant[]
-  callInvites     CallInvite[]
-  knocks          WaitingRoomEntry[]
-  guestKnocks     GuestWaitingEntry[]
-  guestBans       MeetingGuestBan[]
-  creationRequest MeetingCreationRequest?
+  currentHostId      String?
+  /// The group this call belongs to, or null for a 1-on-1 or a link meeting.
+  ///
+  /// `SetNull` rather than `Cascade`: deleting a group must not erase the
+  /// attendance history of calls that happened in it. The meeting simply stops
+  /// being attributed to a group.
+  groupId            String?
+  group              Group?                  @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  currentHost        User?                   @relation("MeetingCurrentHost", fields: [currentHostId], references: [id], onDelete: SetNull)
+  host               User                    @relation("MeetingHost", fields: [hostId], references: [id], onDelete: Cascade)
+  participants       Participant[]
+  callInvites        CallInvite[]
+  knocks             WaitingRoomEntry[]
+  guestKnocks        GuestWaitingEntry[]
+  guestBans          MeetingGuestBan[]
+  creationRequest    MeetingCreationRequest?
 
   @@index([hostId])
   @@index([currentHostId])
+  /// Serves the per-group call-reuse lookup, which filters by group and recency.
+  @@index([groupId, createdAt])
 }
 
 /// A mid-call invitation that turns a 1-on-1 into a group call.
@@ -294,13 +306,13 @@ model Meeting {
 /// Keeping them apart means a declined invite leaves no trace in attendance
 /// history, and the ringing query never has to guess why a row exists.
 model CallInvite {
-  id         String    @id @default(cuid())
-  meetingId  String
-  senderId   String
-  receiverId String
-  createdAt  DateTime  @default(now())
+  id          String    @id @default(cuid())
+  meetingId   String
+  senderId    String
+  receiverId  String
+  createdAt   DateTime  @default(now())
   /// Set when the invitee joins. Stops the banner ringing for an answered call.
-  acceptedAt DateTime?
+  acceptedAt  DateTime?
   /// Set when the invitee declines. Also stops the ring, without implying they
   /// ever joined.
   dismissedAt DateTime?
@@ -349,4 +361,106 @@ model Participant {
   @@unique([userId, meetingId])
   @@index([meetingId])
   @@index([meetingId, isCoHost])
+}
+
+enum GroupRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+/// A named set of people who can chat and call together.
+///
+/// Membership is the permission boundary, deliberately decoupled from
+/// `ConnectionRequest`: you must be connected to someone to *add* them, but the
+/// group keeps working afterwards even if two of its members are not connected to
+/// each other. Requiring a full mesh of accepted connections would make a group
+/// of five collapse the moment any one pair disconnected.
+model Group {
+  id          String  @id @default(cuid())
+  name        String
+  /// Optional one-line purpose, shown under the name in the list.
+  description String?
+  /// Creator, and the only role that can delete the group. Moves on if they
+  /// leave, so a group is never left without an owner.
+  ownerId     String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner    User           @relation("GroupOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members  GroupMember[]
+  messages GroupMessage[]
+  meetings Meeting[]
+
+  @@index([ownerId])
+}
+
+/// One person's place in a group.
+model GroupMember {
+  id      String    @id @default(cuid())
+  groupId String
+  userId  String
+  role    GroupRole @default(MEMBER)
+
+  joinedAt   DateTime  @default(now())
+  /// Read cursor for this member.
+  ///
+  /// A cursor rather than a per-message flag, which is the one part of
+  /// `DirectMessage` that does not generalise: `readAt` works because a direct
+  /// message has exactly one recipient, whereas a group message has as many
+  /// readers as the group has members. Unread is therefore "messages newer than
+  /// this, written by somebody else", which is one indexed count per group
+  /// instead of a row per message per member.
+  ///
+  /// Null means they have never opened the group, so everything counts as unread.
+  lastReadAt DateTime?
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// One membership per person per group, so adding someone twice updates the
+  /// existing row rather than giving them two seats and two unread counts.
+  @@unique([groupId, userId])
+  /// Serves "which groups am I in", which every group page starts with.
+  @@index([userId])
+  /// Serves the owner/admin lookups that gate member management.
+  @@index([groupId, role])
+}
+
+/// A message sent to a group.
+///
+/// Mirrors `DirectMessage` field for field apart from the recipient: one
+/// `groupId` in place of a `receiverId`, and no `readAt` (see
+/// `GroupMember.lastReadAt`). Keeping the shapes aligned means the thread UI,
+/// the link-preview cache and the tokenizer are all reused unchanged.
+model GroupMessage {
+  id        String    @id @default(cuid())
+  groupId   String
+  senderId  String
+  body      String
+  createdAt DateTime  @default(now())
+  /// Client-generated idempotency key. A retry or double-tap carrying the same
+  /// value is collapsed by the unique index below rather than duplicated.
+  clientId  String?
+  /// Set the first time the author edits, which is what drives the "(edited)"
+  /// tag. Null means never edited.
+  editedAt  DateTime?
+  /// Soft delete: the row survives so replies pointing at it keep their context,
+  /// but the body is no longer served.
+  deletedAt DateTime?
+
+  /// Quoted message. Self-relation, nullable, and deliberately `SetNull` on
+  /// delete so removing the quoted row leaves the reply intact.
+  replyToId String?
+  replyTo   GroupMessage?  @relation("GroupMessageReply", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies   GroupMessage[] @relation("GroupMessageReply")
+
+  group  Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  sender User  @relation("GroupMessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, clientId])
+  /// Serves the thread window, which reads one group newest-first.
+  @@index([groupId, createdAt])
+  @@index([replyToId])
 }

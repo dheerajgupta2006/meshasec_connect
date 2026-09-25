@@ -72,6 +72,23 @@ self.addEventListener("push", (event) => {
         data: { url: `/messages/${encodeURIComponent(payload.fromUsername)}` },
       }),
     );
+
+    return;
+  }
+
+  if (payload.kind === "group_message") {
+    event.waitUntil(
+      // Titled with the group rather than the sender, because the group is what
+      // the reader recognises and it is where tapping takes them.
+      self.registration.showNotification(payload.groupName, {
+        body: `${payload.fromName}: ${payload.preview}`,
+        // Tagged per group so a busy conversation replaces its own notification
+        // instead of stacking one per message.
+        tag: `group-${payload.groupId}`,
+        renotify: true,
+        data: { url: `/groups/${encodeURIComponent(payload.groupId)}` },
+      }),
+    );
   }
 });
 
