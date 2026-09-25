@@ -24,7 +24,7 @@ import {
   setGroupRole,
   updateGroup,
   type AddableConnection,
-} from "@/app/groups/actions";
+} from "@/app/dashboard/groups/actions";
 import type { GroupMemberSummary } from "@/components/groups/group-thread";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -559,7 +559,7 @@ export function GroupMembersPanel({
                 disabled={busy !== null}
                 onClick={() =>
                   run("leave", () => leaveGroup(groupId), {
-                    navigateTo: "/groups",
+                    navigateTo: "/dashboard/groups",
                   })
                 }
               >
@@ -602,7 +602,7 @@ export function GroupMembersPanel({
                   disabled={busy !== null}
                   onClick={() =>
                     run("delete", () => deleteGroup(groupId), {
-                      navigateTo: "/groups",
+                      navigateTo: "/dashboard/groups",
                     })
                   }
                 >

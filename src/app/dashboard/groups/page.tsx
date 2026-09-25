@@ -71,7 +71,7 @@ export default async function GroupsPage() {
             {groups.map((group) => (
               <li key={group.id}>
                 <Link
-                  href={`/groups/${encodeURIComponent(group.id)}`}
+                  href={`/dashboard/groups/${encodeURIComponent(group.id)}`}
                   className="block rounded-xl border bg-card p-4 transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md"
                 >
                   <div className="flex items-center gap-4">

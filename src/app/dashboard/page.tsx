@@ -26,6 +26,7 @@ import {
   ContactsList,
   type ContactSummary,
 } from "@/components/connections/contacts-list";
+import { DashboardGroups } from "@/components/groups/dashboard-groups";
 import { QuickActions } from "@/components/dashboard/quick-actions";
 import { StatusBadge } from "@/components/dashboard/status-badge";
 import { Button } from "@/components/ui/button";
@@ -33,6 +34,7 @@ import {
   listContacts,
   listSentPendingRequests,
 } from "@/lib/connections/queries";
+import { listMyGroups } from "@/lib/groups/queries";
 import { prisma } from "@/lib/prisma";
 import { ensureCurrentUser } from "@/lib/users/current-user";
 
@@ -324,9 +326,13 @@ export default async function DashboardPage() {
   // Resolves (and provisions) the local row that connections are keyed on.
   const me = await ensureCurrentUser();
 
-  const [contacts, outgoing] = me === null
-    ? [[], []]
-    : await Promise.all([listContacts(me.id), listSentPendingRequests(me.id)]);
+  const [contacts, outgoing, myGroups] = me === null
+    ? [[], [], []]
+    : await Promise.all([
+        listContacts(me.id),
+        listSentPendingRequests(me.id),
+        listMyGroups(me.id),
+      ]);
 
   const contactSummaries: ContactSummary[] = contacts.map((person) => ({
     id: person.id,
@@ -466,6 +472,10 @@ export default async function DashboardPage() {
           contacts={contactSummaries}
           outgoing={outgoingSummaries}
         />
+
+        {/* Above the meeting sections: a group is a thing you act on, whereas the
+            meeting lists are mostly history. */}
+        <DashboardGroups groups={myGroups} />
 
         {/* Only rendered when something is actually live. An always-visible empty
             "Ongoing" section would be noise on most visits. */}

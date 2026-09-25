@@ -23,13 +23,13 @@ import {
   type KeyboardEvent,
 } from "react";
 
-import { startGroupCall } from "@/app/groups/call-actions";
+import { startGroupCall } from "@/app/dashboard/groups/call-actions";
 import {
   deleteGroupMessage,
   editGroupMessage,
   markGroupRead,
   sendGroupMessage,
-} from "@/app/groups/message-actions";
+} from "@/app/dashboard/groups/message-actions";
 import { GroupMembersPanel } from "@/components/groups/group-members-panel";
 import { LinkPreviewCard } from "@/components/messages/link-preview-card";
 import { MessageBody } from "@/components/messages/message-body";

@@ -9,7 +9,7 @@ import { usePathname } from "next/navigation";
  * The links all jump to anchors on the landing page, so following one from
  * inside a call tears the room down. They are hidden here instead.
  */
-const HIDDEN_PREFIXES = ["/meeting", "/messages"];
+const HIDDEN_PREFIXES = ["/meeting", "/messages", "/dashboard/groups"];
 
 /**
  * Shared with `MobileMenu`, which surfaces these same links below `lg` where

@@ -28,10 +28,14 @@ export async function GroupsNavLink() {
       asChild
       variant="ghost"
       size="icon"
-      className="relative"
+      // Hidden below `sm`, where `MobileMenu` carries a Groups row instead. The
+      // phone header already runs out of width at the wordmark — the same reason
+      // the Dashboard button and both toggles are desktop-only — and this would
+      // have been the fifth control in that cluster.
+      className="relative hidden sm:inline-flex"
       aria-label={unread > 0 ? `Groups, ${unread} unread` : "Groups"}
     >
-      <Link href="/groups">
+      <Link href="/dashboard/groups">
         <Users className="h-5 w-5" />
         {unread > 0 && (
           <span

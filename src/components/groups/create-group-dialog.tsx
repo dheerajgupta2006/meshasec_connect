@@ -15,7 +15,7 @@ import {
   createGroup,
   listAddableConnections,
   type AddableConnection,
-} from "@/app/groups/actions";
+} from "@/app/dashboard/groups/actions";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -32,6 +32,11 @@ import {
 } from "@/lib/groups/limits";
 import { cn } from "@/lib/utils";
 
+interface CreateGroupDialogProps {
+  /** `sm` where the trigger sits in a section header rather than a page header. */
+  size?: "default" | "sm";
+}
+
 /**
  * Creating a group.
  *
@@ -45,7 +50,9 @@ import { cn } from "@/lib/utils";
  * client — the list is already in memory and a round trip per keystroke would buy
  * nothing.
  */
-export function CreateGroupDialog() {
+export function CreateGroupDialog({
+  size = "default",
+}: CreateGroupDialogProps = {}) {
   const router = useRouter();
 
   const [open, setOpen] = useState(false);
@@ -176,13 +183,13 @@ export function CreateGroupDialog() {
       }
 
       handleOpenChange(false);
-      router.push(`/groups/${encodeURIComponent(outcome.groupId)}`);
+      router.push(`/dashboard/groups/${encodeURIComponent(outcome.groupId)}`);
     });
   }
 
   return (
     <>
-      <Button type="button" onClick={() => setOpen(true)}>
+      <Button type="button" size={size} onClick={() => setOpen(true)}>
         <Plus className="h-4 w-4" aria-hidden="true" />
         New group
       </Button>

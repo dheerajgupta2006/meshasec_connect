@@ -77,8 +77,10 @@ function throttle(
 }
 
 function refreshGroup(groupId: string): void {
-  revalidatePath("/groups");
-  revalidatePath(`/groups/${groupId}`);
+  // The dashboard shows a groups summary, so it is revalidated too.
+  revalidatePath("/dashboard");
+  revalidatePath("/dashboard/groups");
+  revalidatePath(`/dashboard/groups/${groupId}`);
 }
 
 /**
@@ -496,7 +498,8 @@ export async function leaveGroup(
     return { ok: false, message: "We could not leave that group." };
   }
 
-  revalidatePath("/groups");
+  revalidatePath("/dashboard");
+  revalidatePath("/dashboard/groups");
 
   return { ok: true, message: "You left the group." };
 }
@@ -669,7 +672,8 @@ export async function deleteGroup(
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2025"
     ) {
-      revalidatePath("/groups");
+      revalidatePath("/dashboard");
+  revalidatePath("/dashboard/groups");
       return { ok: true, message: "Group deleted." };
     }
 
@@ -680,7 +684,8 @@ export async function deleteGroup(
     return { ok: false, message: "We could not delete that group." };
   }
 
-  revalidatePath("/groups");
+  revalidatePath("/dashboard");
+  revalidatePath("/dashboard/groups");
 
   return { ok: true, message: "Group deleted." };
 }

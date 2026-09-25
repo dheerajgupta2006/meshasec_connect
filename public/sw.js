@@ -86,7 +86,7 @@ self.addEventListener("push", (event) => {
         // instead of stacking one per message.
         tag: `group-${payload.groupId}`,
         renotify: true,
-        data: { url: `/groups/${encodeURIComponent(payload.groupId)}` },
+        data: { url: `/dashboard/groups/${encodeURIComponent(payload.groupId)}` },
       }),
     );
   }

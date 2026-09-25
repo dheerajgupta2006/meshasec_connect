@@ -13,6 +13,7 @@ import { IncomingCallBanner } from "@/components/calls/incoming-call-banner";
 import { NotificationsMenu } from "@/components/connections/notifications-menu";
 import { MarketingNav } from "@/components/marketing-nav";
 import { MobileMenu } from "@/components/mobile-menu";
+import { GroupsNavLink } from "@/components/groups/groups-nav-link";
 import { CallProvider } from "@/components/meeting/call-provider";
 import { MessageNotifier } from "@/components/messages/message-notifier";
 import { MessagesNavLink } from "@/components/messages/messages-nav-link";
@@ -166,6 +167,7 @@ export default function RootLayout({
                 <HeaderAuthControls
                   signedInSlot={
                     <>
+                      <GroupsNavLink />
                       <MessagesNavLink />
                       <NotificationsMenu />
                     </>

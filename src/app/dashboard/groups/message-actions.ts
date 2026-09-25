@@ -82,8 +82,8 @@ function checkWriteQuota(userId: string): GroupMessageActionResult | null {
 }
 
 function revalidateGroup(groupId: string): void {
-  revalidatePath("/groups");
-  revalidatePath(`/groups/${groupId}`);
+  revalidatePath("/dashboard/groups");
+  revalidatePath(`/dashboard/groups/${groupId}`);
 }
 
 /**
@@ -434,7 +434,7 @@ export async function markGroupRead(
     data: { lastReadAt: new Date() },
   });
 
-  revalidatePath("/groups");
+  revalidatePath("/dashboard/groups");
 
   return { ok: true, message: "Marked as read." };
 }

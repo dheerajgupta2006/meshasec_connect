@@ -48,7 +48,7 @@ export default async function GroupPage({ params }: GroupPageProps) {
     <main className="min-h-[calc(100vh-4rem)] bg-gradient-to-b from-primary/[0.06] via-background to-background">
       <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6">
         <Button asChild variant="ghost" size="sm" className="mb-3 -ml-2">
-          <Link href="/groups">
+          <Link href="/dashboard/groups">
             <ArrowLeft className="h-4 w-4" aria-hidden="true" />
             All groups
           </Link>

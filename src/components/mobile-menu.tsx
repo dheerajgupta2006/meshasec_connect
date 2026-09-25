@@ -1,7 +1,7 @@
 "use client";
 
 import { SignedIn } from "@clerk/nextjs";
-import { LayoutDashboard, Menu } from "lucide-react";
+import { LayoutDashboard, Menu, Users } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
@@ -87,6 +87,14 @@ export function MobileMenu() {
               >
                 <LayoutDashboard className="h-4 w-4 shrink-0" aria-hidden="true" />
                 Dashboard
+              </Link>
+              <Link
+                href="/dashboard/groups"
+                onClick={() => setOpen(false)}
+                className="flex h-11 items-center gap-2.5 rounded-lg px-3 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground"
+              >
+                <Users className="h-4 w-4 shrink-0" aria-hidden="true" />
+                Groups
               </Link>
             </SignedIn>
 
