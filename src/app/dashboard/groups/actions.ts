@@ -38,6 +38,13 @@ import { prisma } from "@/lib/prisma";
 import { consumeRateLimit, describeRetryAfter } from "@/lib/rate-limit";
 import { ensureCurrentUser } from "@/lib/users/current-user";
 
+/**
+ * Thrown inside `addGroupMembers`' transaction to roll it back when the batch
+ * would exceed `MAX_GROUP_MEMBERS`. A class rather than a message check so it
+ * cannot be confused with a database error.
+ */
+class GroupFullError extends Error {}
+
 export interface GroupActionResult {
   ok: boolean;
   message: string;
@@ -310,18 +317,46 @@ export async function addGroupMembers(
   }
 
   try {
-    // `createMany` with `skipDuplicates` rather than a loop of upserts: the unique
-    // index is what settles a race between two admins adding the same person, and
-    // this lets the database settle it in one statement.
-    await prisma.groupMember.createMany({
-      data: allowed.map((person) => ({
-        groupId,
-        userId: person.id,
-        role: GroupRole.MEMBER,
-      })),
-      skipDuplicates: true,
+    await prisma.$transaction(async (tx) => {
+      // Takes a row lock on the group, held until commit. That is the whole point
+      // of this write: the capacity check above ran outside any transaction, so two
+      // admins adding at once could each see room for their batch and together push
+      // the group past the cap. With the lock, a second adder blocks here until the
+      // first commits, and the count below then includes the first adder's rows.
+      // `updatedAt` is touched because it is the one column nothing reads.
+      await tx.group.update({
+        where: { id: groupId },
+        data: { updatedAt: new Date() },
+        select: { id: true },
+      });
+
+      // `createMany` with `skipDuplicates` rather than a loop of upserts: the
+      // unique index settles two admins adding the same person.
+      await tx.groupMember.createMany({
+        data: allowed.map((person) => ({
+          groupId,
+          userId: person.id,
+          role: GroupRole.MEMBER,
+        })),
+        skipDuplicates: true,
+      });
+
+      // Counted after inserting rather than before, so duplicates skipped above
+      // are not mistaken for seats taken. Over the cap rolls the whole batch back.
+      const size = await tx.groupMember.count({ where: { groupId } });
+
+      if (size > MAX_GROUP_MEMBERS) {
+        throw new GroupFullError();
+      }
     });
   } catch (error: unknown) {
+    if (error instanceof GroupFullError) {
+      return {
+        ok: false,
+        message: `That would take the group past ${String(MAX_GROUP_MEMBERS)} members. Someone else may have just added people — reopen the list and try again.`,
+      };
+    }
+
     console.error("add_group_members_failed", {
       message: error instanceof Error ? error.message : "unknown error",
     });

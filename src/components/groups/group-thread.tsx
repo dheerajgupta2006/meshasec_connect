@@ -102,6 +102,36 @@ interface GroupThreadProps {
 /** How often to check for new messages while the thread is open. */
 const POLL_INTERVAL_MS = 7000;
 
+/**
+ * Minimum gap between full `router.refresh()` calls.
+ *
+ * A refresh re-renders the whole tree — the group page's server component and the
+ * root layout — and its only job here is keeping the header's unread badge and the
+ * member list current. On a busy group every poll carried a new message, so that
+ * meant a full refetch every seven seconds per open thread. The trailing call
+ * below guarantees the last change is still reflected, just not more often than
+ * this.
+ */
+const TREE_REFRESH_MIN_MS = 20000;
+
+/**
+ * Orders messages by timestamp, keeping arrival order for ties.
+ *
+ * Only needed when local rows are merged onto a poll result. A row confirmed by
+ * the server carries the server's timestamp, so it now lands in its true place
+ * instead of always after everything the poll returned. A still-pending row
+ * carries the sender's clock, so under heavy clock skew it can briefly sit one
+ * place out — corrected the moment the send confirms.
+ */
+function byCreatedAt(items: ThreadItem[]): ThreadItem[] {
+  return items
+    .map((item, index) => ({ item, index, at: Date.parse(item.createdAt) }))
+    .sort((first, second) =>
+      first.at === second.at ? first.index - second.index : first.at - second.at,
+    )
+    .map((entry) => entry.item);
+}
+
 const HIGHLIGHT_MS = 1600;
 
 const DELETED_LABEL = "This message was deleted";
@@ -276,6 +306,63 @@ export function GroupThread({
 
   const canModerate = myRole === "OWNER" || myRole === "ADMIN";
 
+  /**
+   * False once the thread unmounts.
+   *
+   * Not about state-update warnings — React 18 dropped those. The router is
+   * global, so a poll resolving after the user has navigated away would otherwise
+   * call `router.refresh()` on whatever page they are now on, refetching a tree
+   * that has nothing to do with this group.
+   */
+  const mountedRef = useRef(true);
+  const lastTreeRefreshRef = useRef(0);
+  const treeRefreshTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+
+    return () => {
+      mountedRef.current = false;
+
+      if (treeRefreshTimerRef.current !== null) {
+        window.clearTimeout(treeRefreshTimerRef.current);
+        treeRefreshTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  /** `router.refresh()`, at most once per `TREE_REFRESH_MIN_MS`, never dropped. */
+  const refreshTree = useCallback(() => {
+    if (!mountedRef.current) {
+      return;
+    }
+
+    const wait = lastTreeRefreshRef.current + TREE_REFRESH_MIN_MS - Date.now();
+
+    if (wait <= 0) {
+      lastTreeRefreshRef.current = Date.now();
+      router.refresh();
+      return;
+    }
+
+    // One trailing refresh is enough to cover every change in the window, so a
+    // second request inside it is folded into the one already scheduled.
+    if (treeRefreshTimerRef.current !== null) {
+      return;
+    }
+
+    treeRefreshTimerRef.current = window.setTimeout(() => {
+      treeRefreshTimerRef.current = null;
+
+      if (!mountedRef.current) {
+        return;
+      }
+
+      lastTreeRefreshRef.current = Date.now();
+      router.refresh();
+    }, wait);
+  }, [router]);
+
   const refresh = useCallback(async () => {
     if (pollInFlightRef.current) {
       return;
@@ -296,19 +383,21 @@ export function GroupThread({
       const payload: unknown = await response.json();
       const next = parseMessages(payload);
 
-      if (next === null) {
+      if (next === null || !mountedRef.current) {
         return;
       }
 
-      // Retire local rows the server now reports, then re-append the rest so a
-      // poll can never drop a message the user can already see.
+      // Retire local rows the server now reports, then merge in the rest so a poll
+      // can never drop a message the user can already see. Sorted, because a plain
+      // append put every local row after the whole poll result — so a message
+      // someone else sent *after* yours still rendered above it.
       const known = new Set(next.map((item) => item.id));
       localRowsRef.current = localRowsRef.current.filter(
         (item) => !known.has(item.id),
       );
 
       const extras = localRowsRef.current;
-      setMessages(extras.length === 0 ? next : [...next, ...extras]);
+      setMessages(extras.length === 0 ? next : byCreatedAt([...next, ...extras]));
 
       const newest = next.at(-1) ?? null;
       const newestId = newest?.id ?? null;
@@ -319,8 +408,11 @@ export function GroupThread({
         // Only somebody else's message can be unread. Firing on your own sends
         // would cost a write plus a full tree refetch per message.
         if (newest !== null && !newest.outgoing) {
+          // The read cursor is advanced on every arrival — it is one cheap
+          // `updateMany`, and lagging it would mark messages unread that the user
+          // is looking at. Only the expensive tree refresh is throttled.
           await markGroupRead(groupId);
-          router.refresh();
+          refreshTree();
         }
       }
     } catch {
@@ -328,14 +420,14 @@ export function GroupThread({
     } finally {
       pollInFlightRef.current = false;
     }
-  }, [groupId, router]);
+  }, [groupId, refreshTree]);
 
   // Clear the unread count for what is already on screen, and pull a full payload
   // straight away: the server component may have handed over the base shape only.
   useEffect(() => {
-    void markGroupRead(groupId).then(() => router.refresh());
+    void markGroupRead(groupId).then(() => refreshTree());
     void refresh();
-  }, [groupId, router, refresh]);
+  }, [groupId, refreshTree, refresh]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
