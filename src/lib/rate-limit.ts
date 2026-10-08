@@ -115,17 +115,6 @@ export const RATE_LIMITS = {
    * out to every member — it is a different cost, so it gets a different budget.
    */
   groupMessage: { limit: 30, windowMs: 60 * 1000 },
-  /**
-   * Cloud speech synthesis for translated captions.
-   *
-   * Each call spends part of a metered monthly quota, so this bounds how fast one
-   * account can drain it. Generous, because dubbing a continuous speaker is
-   * legitimately chatty — a sentence every few seconds — and cache hits pass
-   * through here too. The real defence for the quota is the clip cache in
-   * `lib/translation/azure-tts.ts`; this only stops one account spending
-   * everybody else's budget.
-   */
-  speechSynthesis: { limit: 240, windowMs: 10 * 60 * 1000 },
 } as const satisfies Record<string, RateLimitRule>;
 
 export type RateLimitAction = keyof typeof RATE_LIMITS;
