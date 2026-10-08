@@ -10,6 +10,9 @@
  *   analytics dashboard and in that provider's database.
  * - `/messages/<username>`. Not a credential, but it discloses who talks to whom.
  *   That is the social graph of a private messaging feature.
+ * - `/dashboard/groups/<groupId>`. Membership protects the page, but sending the
+ *   id would still split the analytics report into one row per private group and
+ *   reveal stable internal identifiers to a third party.
  *
  * Replacing the dynamic segment with a placeholder keeps the analytics useful —
  * you still see how many lobby views or thread opens there were — while the value
@@ -55,6 +58,18 @@ export function redactAnalyticsPath(input: string): string {
     segments[2].length > 0
   ) {
     segments[2] = placeholder;
+  }
+
+  // Groups are nested under the dashboard rather than at the root, so the
+  // first-segment table above cannot describe them without also redacting every
+  // `/dashboard/<section>` route.
+  if (
+    segments[1] === "dashboard" &&
+    segments[2] === "groups" &&
+    segments.length > 3 &&
+    segments[3].length > 0
+  ) {
+    segments[3] = "[groupId]";
   }
 
   return segments.join("/");

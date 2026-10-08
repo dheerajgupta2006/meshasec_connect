@@ -1,8 +1,13 @@
 "use client";
 
 import Script from "next/script";
+import { usePathname } from "next/navigation";
+import * as React from "react";
 
-import { redactAnalyticsUrl } from "@/lib/analytics/redact-url";
+import {
+  redactAnalyticsPath,
+  redactAnalyticsUrl,
+} from "@/lib/analytics/redact-url";
 
 /**
  * Umami analytics, wired so it cannot leak meeting codes or usernames.
@@ -11,8 +16,12 @@ import { redactAnalyticsUrl } from "@/lib/analytics/redact-url";
  * `NEXT_PUBLIC_UMAMI_SRC` are set, so local development and forks send no data
  * without anyone opting in.
  *
- * The tracker handles client-side navigation on its own — it watches for path
- * changes — so no route-change effect is needed on top of it.
+ * Page views are sent explicitly from `usePathname`. Umami normally patches the
+ * History API to detect SPA navigation, but that automatic path did not fire
+ * reliably in this Next.js App Router application: manual events reached Umami
+ * while route changes did not. `data-auto-pageview="false"` disables only Umami's
+ * page-view automation; click events, performance collection and `umami.track`
+ * remain available.
  */
 
 /**
@@ -34,6 +43,35 @@ type BeforeSendHandler = (
   type: string,
   payload: UmamiPayload,
 ) => UmamiPayload | false;
+
+type UmamiTrackInput =
+  | string
+  | UmamiPayload
+  | ((defaults: UmamiPayload) => UmamiPayload);
+
+interface UmamiTracker {
+  track(input?: UmamiTrackInput, data?: Record<string, unknown>): Promise<void>;
+}
+
+/** Reads the tracker without globally claiming that every page always has it. */
+function readTracker(): UmamiTracker | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const candidate = (window as unknown as { umami?: unknown }).umami;
+
+  if (
+    typeof candidate !== "object" ||
+    candidate === null ||
+    !("track" in candidate) ||
+    typeof (candidate as { track?: unknown }).track !== "function"
+  ) {
+    return null;
+  }
+
+  return candidate as UmamiTracker;
+}
 
 /**
  * Publishes the handler under the name the tracker will look for.
@@ -95,17 +133,61 @@ function allowedHostname(): string | undefined {
 }
 
 export function UmamiAnalytics() {
+  const pathname = usePathname();
+  const [trackerReady, setTrackerReady] = React.useState(false);
+  /** Raw path, not redacted path: two different private group ids both redact to
+      the same route, but navigating between them is still a real page view. */
+  const lastTrackedPathRef = React.useRef<string | null>(null);
+
   const websiteId = process.env.NEXT_PUBLIC_UMAMI_WEBSITE_ID;
   const src = process.env.NEXT_PUBLIC_UMAMI_SRC;
+  const configured =
+    websiteId !== undefined &&
+    websiteId.length > 0 &&
+    src !== undefined &&
+    src.length > 0;
 
-  if (
-    websiteId === undefined ||
-    websiteId.length === 0 ||
-    src === undefined ||
-    src.length === 0
-  ) {
+  const handleTrackerReady = React.useCallback(() => {
+    setTrackerReady(true);
+  }, []);
+
+  React.useEffect(() => {
+    if (!configured || !trackerReady) {
+      return;
+    }
+
+    const tracker = readTracker();
+
+    if (tracker === null || lastTrackedPathRef.current === pathname) {
+      return;
+    }
+
+    // Mark before invoking. Umami deliberately swallows delivery failures and
+    // resolves the call, so retrying here cannot distinguish a failed network
+    // request from a delivered one and risks double-counting.
+    lastTrackedPathRef.current = pathname;
+
+    const redactedPath = redactAnalyticsPath(pathname);
+
+    // The function form preserves Umami's normal page-view properties (website,
+    // hostname, screen, language and referrer) and changes only what this app owns.
+    // Passing a string would create a named event — exactly what the manual
+    // `umami.track("debug-test")` diagnosis did — not a page view.
+    void tracker.track((defaults) => ({
+      ...defaults,
+      url: redactedPath,
+      title: document.title,
+    }));
+  }, [configured, pathname, trackerReady]);
+
+  if (!configured) {
     return null;
   }
+
+  // Narrowed by `configured`, but TypeScript does not retain the relationship
+  // between that boolean and two independent values.
+  const trackerSrc = src as string;
+  const trackerWebsiteId = websiteId as string;
 
   // Installed during render rather than in an effect. The tracker resolves
   // `data-before-send` by name the moment it initialises, and an
@@ -116,12 +198,18 @@ export function UmamiAnalytics() {
 
   return (
     <Script
-      src={src}
+      src={trackerSrc}
       // Not `beforeInteractive`: analytics must never sit on the critical path of
       // a page whose job is to join a video call.
       strategy="afterInteractive"
-      data-website-id={websiteId}
+      data-website-id={trackerWebsiteId}
       data-before-send={BEFORE_SEND_HANDLER}
+      // The App Router is the source of truth for navigation. Leaving Umami's
+      // History API patch enabled as well would count every successful route
+      // change twice once explicit tracking above works.
+      data-auto-pageview="false"
+      onLoad={handleTrackerReady}
+      onReady={handleTrackerReady}
       // Belt and braces alongside the redaction above, which already drops both.
       data-exclude-search="true"
       data-exclude-hash="true"
