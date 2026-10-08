@@ -44,6 +44,76 @@ function parseAllowedOrigins(configured) {
   return hosts.length > 0 ? hosts : ["localhost:3000"];
 }
 
+/**
+ * Refuses a production build that is still carrying Clerk development keys.
+ *
+ * A `pk_test_` key puts a "Development mode" badge under every sign-in form and
+ * makes Clerk log a warning about relaxed security and strict usage limits. That
+ * shipped to the live site once already and went unnoticed for weeks, because the
+ * only signal was a line in a build log and a badge nobody was looking at. This
+ * turns it into a failed deploy, which is the only signal that cannot be missed.
+ *
+ * Gated on `VERCEL_ENV === "production"` rather than `NODE_ENV`, and the
+ * distinction matters: `NODE_ENV` is `production` for preview builds too, and a
+ * preview *must* keep development keys. Clerk binds `pk_live_` to the production
+ * domain and rejects every other origin, so a preview deployment built with live
+ * keys cannot authenticate anyone. Local `next build` is likewise unaffected.
+ *
+ * @returns {void}
+ */
+function assertProductionAuthKeys() {
+  if (process.env.VERCEL_ENV !== "production") {
+    return;
+  }
+
+  // Deliberate, named, and loud. Needed when a release cannot wait for the Clerk
+  // production instance's DNS to verify — but it leaves the badge on the live
+  // site, so it is not something to set and forget.
+  if (process.env.ALLOW_CLERK_DEV_KEYS === "true") {
+    console.warn(
+      "WARNING: building production with Clerk development keys because " +
+        "ALLOW_CLERK_DEV_KEYS=true. The sign-in form will show a " +
+        '"Development mode" badge and Clerk usage limits apply.',
+    );
+    return;
+  }
+
+  const offenders = [];
+
+  if ((process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY ?? "").startsWith("pk_test_")) {
+    offenders.push("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY (pk_test_…)");
+  }
+
+  if ((process.env.CLERK_SECRET_KEY ?? "").startsWith("sk_test_")) {
+    offenders.push("CLERK_SECRET_KEY (sk_test_…)");
+  }
+
+  if (offenders.length === 0) {
+    return;
+  }
+
+  throw new Error(
+    [
+      "Refusing to build production with Clerk development keys.",
+      "",
+      `Development keys found: ${offenders.join(", ")}`,
+      "",
+      "These render a \"Development mode\" badge on the sign-in form and run",
+      "under Clerk's development usage limits.",
+      "",
+      "To fix: create a production instance in the Clerk Dashboard, verify its",
+      "domain, then set the pk_live_ / sk_live_ keys on the Production",
+      "environment of this Vercel project. Leave the pk_test_ keys in place for",
+      "local development and Preview deployments — live keys only work on the",
+      "production domain.",
+      "",
+      "To ship anyway, set ALLOW_CLERK_DEV_KEYS=true. The badge stays visible.",
+    ].join("\n"),
+  );
+}
+
+assertProductionAuthKeys();
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {
