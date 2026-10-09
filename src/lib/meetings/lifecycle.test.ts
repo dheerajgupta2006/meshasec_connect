@@ -6,6 +6,7 @@ import {
   STALE_AFTER_MS,
   groupMeetingsByActivity,
   hasEnded,
+  isScheduleEditable,
   openedAt,
   partitionMeetings,
   resolveMeetingActivity,
@@ -457,5 +458,85 @@ describe("groupMeetingsByActivity", () => {
     groupMeetingsByActivity(meetings, new Map(), NOW);
 
     expect(meetings).toEqual(snapshot);
+  });
+});
+
+describe("isScheduleEditable", () => {
+  it("allows a scheduled meeting that has not started", () => {
+    expect(isScheduleEditable(scheduled(HOUR, 2 * HOUR), NOW)).toBe(true);
+    expect(isScheduleEditable(scheduled(MINUTE), NOW)).toBe(true);
+  });
+
+  it("refuses from the moment the start time arrives", () => {
+    expect(isScheduleEditable(scheduled(0, HOUR), NOW)).toBe(false);
+    expect(isScheduleEditable(scheduled(-MINUTE, HOUR), NOW)).toBe(false);
+    expect(isScheduleEditable(scheduled(-MINUTE), NOW)).toBe(false);
+  });
+
+  it("refuses a meeting that is over", () => {
+    expect(isScheduleEditable(scheduled(-2 * HOUR, -HOUR), NOW)).toBe(false);
+  });
+
+  it("refuses a scheduled meeting the host ended before its start time", () => {
+    // `endMeeting` stamps `endsAt` with when it ran. Run early, that is before
+    // `startsAt`: the meeting is over although its start is still ahead.
+    expect(isScheduleEditable(scheduled(HOUR, -MINUTE), NOW)).toBe(false);
+  });
+
+  it("never offers an instant meeting, which has no schedule to change", () => {
+    expect(isScheduleEditable(instant(-MINUTE), NOW)).toBe(false);
+    expect(isScheduleEditable(instant(-STALE_AFTER_MS), NOW)).toBe(false);
+  });
+
+  it("refuses a corrupt start rather than treating it as editable", () => {
+    const corrupt = {
+      createdAt: at(-HOUR),
+      startsAt: new Date(Number.NaN),
+      endsAt: null,
+    };
+
+    expect(isScheduleEditable(corrupt, NOW)).toBe(false);
+  });
+
+  it("is never editable at or after the start, whatever the end", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: -48 * 60, max: 48 * 60 }),
+        fc.option(fc.integer({ min: -48 * 60, max: 48 * 60 }), { nil: null }),
+        (startMinutes, endMinutes) => {
+          const meeting = scheduled(
+            startMinutes * MINUTE,
+            endMinutes === null ? null : endMinutes * MINUTE,
+          );
+
+          if (startMinutes <= 0) {
+            expect(isScheduleEditable(meeting, NOW)).toBe(false);
+          }
+        },
+      ),
+      { numRuns: 400 },
+    );
+  });
+
+  it("agrees with the dashboard: anything editable is listed as upcoming", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: -48 * 60, max: 48 * 60 }),
+        fc.option(fc.integer({ min: -48 * 60, max: 48 * 60 }), { nil: null }),
+        (startMinutes, endMinutes) => {
+          const meeting = scheduled(
+            startMinutes * MINUTE,
+            endMinutes === null ? null : endMinutes * MINUTE,
+          );
+
+          if (isScheduleEditable(meeting, NOW)) {
+            expect(
+              resolveMeetingActivity({ meeting, liveParticipants: 0, now: NOW }),
+            ).toBe("upcoming");
+          }
+        },
+      ),
+      { numRuns: 400 },
+    );
   });
 });

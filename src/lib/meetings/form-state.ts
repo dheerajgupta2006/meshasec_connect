@@ -72,6 +72,13 @@ const FIELD_FOCUS_ORDER: readonly CreationFieldName[] = [
 
 const LOADING_ANNOUNCEMENT = "Creating your meeting. Please wait.";
 const SUCCESS_ANNOUNCEMENT = "Meeting created. Opening the pre-join lobby.";
+/**
+ * A scheduled meeting is for later, so the form does not navigate: it shows the
+ * link and passcode to share instead. Announcing "opening the lobby" here would
+ * tell a screen-reader user something that never happens.
+ */
+const SCHEDULED_SUCCESS_ANNOUNCEMENT =
+  "Meeting scheduled. The meeting link and passcode are ready to share.";
 const NAVIGATION_FAILED_ANNOUNCEMENT =
   "Meeting created, but the lobby did not open automatically. Use the lobby link to continue.";
 const CLIENT_INVALID_ANNOUNCEMENT =
@@ -183,7 +190,10 @@ export function meetingCreationReducer(
         status: { kind: "success", result: event.result, navigationFailed: false },
         fieldErrors: {},
         focusTarget: null,
-        announcement: SUCCESS_ANNOUNCEMENT,
+        announcement:
+          event.result.startsAt === null
+            ? SUCCESS_ANNOUNCEMENT
+            : SCHEDULED_SUCCESS_ANNOUNCEMENT,
       };
     }
 

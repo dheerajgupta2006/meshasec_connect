@@ -6,6 +6,7 @@ import {
   CalendarClock,
   CheckCircle2,
   LoaderCircle,
+  Share2,
   Video,
   Zap,
 } from "lucide-react";
@@ -21,6 +22,7 @@ import {
 } from "react";
 
 import { createMeetingAction } from "@/app/meeting/new/actions";
+import { MeetingCreatedDialog } from "@/components/meeting/meeting-created-dialog";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -66,6 +68,9 @@ export function MeetingCreationForm() {
 
   const [timeZone, setTimeZone] = useState<string | null>(null);
 
+  /** The share popup for a scheduled meeting. Reopenable from the success notice. */
+  const [detailsOpen, setDetailsOpen] = useState(false);
+
   // Read in an effect, not during render, to avoid a hydration mismatch.
   useEffect(() => {
     try {
@@ -97,7 +102,14 @@ export function MeetingCreationForm() {
   const status = state.status;
 
   useEffect(() => {
-    if (status.kind !== "success" || status.navigationFailed) {
+    // A scheduled meeting is for later, so the host stays here to collect the
+    // link and passcode rather than being dropped into a lobby they have no
+    // reason to be in yet. Only instant meetings navigate.
+    if (
+      status.kind !== "success" ||
+      status.navigationFailed ||
+      status.result.startsAt !== null
+    ) {
       return;
     }
 
@@ -125,8 +137,20 @@ export function MeetingCreationForm() {
     };
   }, [status, router]);
 
+  // Opened on the transition into success. Success is terminal in the reducer, so
+  // `status` never changes again and this cannot re-open a popup the host closed.
+  useEffect(() => {
+    if (status.kind === "success" && status.result.startsAt !== null) {
+      setDetailsOpen(true);
+    }
+  }, [status]);
+
   const isLoading = status.kind === "loading";
   const isSuccess = status.kind === "success";
+  const scheduledResult =
+    status.kind === "success" && status.result.startsAt !== null
+      ? status.result
+      : null;
   const isScheduled = state.draft.mode === "scheduled";
   const submitDisabled = isLoading || isSuccess;
 
@@ -435,7 +459,36 @@ export function MeetingCreationForm() {
               </Alert>
             )}
 
-            {status.kind === "success" && (
+            {scheduledResult !== null && (
+              <Alert role="status">
+                <CheckCircle2 className="h-4 w-4" />
+                <AlertTitle>Meeting scheduled</AlertTitle>
+                <AlertDescription className="space-y-3">
+                  <p>
+                    Your meeting is saved. Share the link and passcode with the
+                    people you are inviting.
+                  </p>
+                  {/* The popup can be closed by accident, and the passcode is
+                      the one detail the host cannot reconstruct, so it stays
+                      one click away. */}
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => setDetailsOpen(true)}
+                    >
+                      <Share2 className="h-4 w-4" aria-hidden="true" />
+                      Show meeting details
+                    </Button>
+                    <Button asChild size="sm" variant="outline">
+                      <Link href="/dashboard">Go to dashboard</Link>
+                    </Button>
+                  </div>
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {status.kind === "success" && scheduledResult === null && (
               <Alert role="status">
                 <CheckCircle2 className="h-4 w-4" />
                 <AlertTitle>Meeting created</AlertTitle>
@@ -475,7 +528,11 @@ export function MeetingCreationForm() {
                 size="lg"
                 className="w-full sm:w-auto"
               >
-                <Link href="/dashboard">Cancel</Link>
+                {/* "Cancel" beside a meeting that already exists reads as an
+                    offer to undo it, which it is not. */}
+                <Link href="/dashboard">
+                  {isSuccess ? "Back to dashboard" : "Cancel"}
+                </Link>
               </Button>
               <Button
                 type="submit"
@@ -499,6 +556,14 @@ export function MeetingCreationForm() {
           </form>
         </CardContent>
       </Card>
+
+      {scheduledResult !== null && (
+        <MeetingCreatedDialog
+          result={scheduledResult}
+          open={detailsOpen}
+          onOpenChange={setDetailsOpen}
+        />
+      )}
     </>
   );
 }

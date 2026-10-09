@@ -96,6 +96,15 @@ export const RATE_LIMITS = {
    * running a lively Q&A never hits it.
    */
   pollModeration: { limit: 60, windowMs: 60 * 1000 },
+  /**
+   * A host saving changes to a meeting's title or schedule.
+   *
+   * Writes only: opening the settings dialog is a read and stays free. Generous,
+   * because nudging a time back and forth while settling on it is normal, but it
+   * bounds how often one account can rewrite a meeting other people have in
+   * their calendars.
+   */
+  meetingSettings: { limit: 30, windowMs: 10 * 60 * 1000 },
   startCall: { limit: 20, windowMs: 10 * 60 * 1000 },
   /**
    * Creating groups. Tight, because each one is a durable object with a roster.

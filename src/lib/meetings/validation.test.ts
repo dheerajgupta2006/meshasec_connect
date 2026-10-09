@@ -10,6 +10,8 @@ import {
   hasDisallowedCharacters,
   normalizeTitle,
   parseIso8601Instant,
+  toDateTimeLocalValue,
+  validateScheduleEdit,
   validateServerInput,
 } from "@/lib/meetings/validation";
 
@@ -409,5 +411,252 @@ describe("validateServerInput — request ID shape", () => {
         ).ok,
       ).toBe(false);
     }
+  });
+});
+
+describe("validateScheduleEdit", () => {
+  const NOW = new Date("2026-10-09T12:00:00.000Z");
+  const nowMs = NOW.getTime();
+
+  function editPayload(overrides: Record<string, unknown> = {}) {
+    return {
+      title: "Team sync",
+      startsAt: isoIn(60, nowMs),
+      endsAt: isoIn(120, nowMs),
+      ...overrides,
+    };
+  }
+
+  it("accepts a future window and normalizes the title", () => {
+    const result = validateScheduleEdit(
+      editPayload({ title: "  Team sync  " }),
+      NOW,
+    );
+
+    expect(result.ok).toBe(true);
+
+    if (result.ok) {
+      expect(result.value.normalizedTitle).toBe("Team sync");
+      expect(result.value.startsAt.toISOString()).toBe(isoIn(60, nowMs));
+      expect(result.value.endsAt?.toISOString()).toBe(isoIn(120, nowMs));
+    }
+  });
+
+  it("treats a blank or absent end as clearing the end time", () => {
+    for (const endsAt of [null, undefined, "", "   "]) {
+      const result = validateScheduleEdit(editPayload({ endsAt }), NOW);
+
+      expect(result.ok).toBe(true);
+
+      if (result.ok) {
+        expect(result.value.endsAt).toBeNull();
+      }
+    }
+  });
+
+  it("always requires a start, since only scheduled meetings are edited", () => {
+    for (const startsAt of [null, undefined, ""]) {
+      const result = validateScheduleEdit(editPayload({ startsAt }), NOW);
+
+      expect(result.ok).toBe(false);
+
+      if (!result.ok) {
+        expect(result.fieldErrors.startsAt).toBeDefined();
+      }
+    }
+  });
+
+  it("refuses to move a meeting to now or into the past", () => {
+    for (const minutes of [0, -1, -600]) {
+      const result = validateScheduleEdit(
+        editPayload({ startsAt: isoIn(minutes, nowMs), endsAt: null }),
+        NOW,
+      );
+
+      expect(result.ok).toBe(false);
+
+      if (!result.ok) {
+        expect(result.fieldErrors.startsAt).toBeDefined();
+      }
+    }
+  });
+
+  it("refuses an end that is not after the start", () => {
+    const start = isoIn(60, nowMs);
+
+    for (const endsAt of [start, isoIn(30, nowMs)]) {
+      const result = validateScheduleEdit(
+        editPayload({ startsAt: start, endsAt }),
+        NOW,
+      );
+
+      expect(result.ok).toBe(false);
+
+      if (!result.ok) {
+        expect(result.fieldErrors.endsAt).toBeDefined();
+      }
+    }
+  });
+
+  it("rejects a start with no offset, which the server cannot place in time", () => {
+    const result = validateScheduleEdit(
+      editPayload({ startsAt: "2026-10-10T09:30:00" }),
+      NOW,
+    );
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("applies the same title rules as creation", () => {
+    expect(validateScheduleEdit(editPayload({ title: "   " }), NOW).ok).toBe(
+      false,
+    );
+    expect(
+      validateScheduleEdit(
+        editPayload({ title: "x".repeat(TITLE_MAX_CHARS + 1) }),
+        NOW,
+      ).ok,
+    ).toBe(false);
+    expect(validateScheduleEdit(editPayload({ title: 42 }), NOW).ok).toBe(
+      false,
+    );
+    expect(
+      validateScheduleEdit(editPayload({ title: "Team\u200Bsync" }), NOW).ok,
+    ).toBe(false);
+  });
+
+  it("rejects server-assigned keys before any field rule runs", () => {
+    // The meeting is named by the action's argument; a payload trying to carry a
+    // meeting code or a host is refused outright.
+    for (const key of ["hostId", "clerkId", "meetingCode", "createdAt"]) {
+      const result = validateScheduleEdit(editPayload({ [key]: "x" }), NOW);
+
+      expect(result.ok).toBe(false);
+
+      if (!result.ok) {
+        expect(result.fieldErrors).toEqual({});
+      }
+    }
+  });
+
+  it("is total over hostile input and only ever accepts a future, ordered window", () => {
+    fc.assert(
+      fc.property(fc.anything(), (raw) => {
+        const result = validateScheduleEdit(raw, NOW);
+
+        if (result.ok) {
+          expect(result.value.startsAt.getTime()).toBeGreaterThan(nowMs);
+
+          if (result.value.endsAt !== null) {
+            expect(result.value.endsAt.getTime()).toBeGreaterThan(
+              result.value.startsAt.getTime(),
+            );
+          }
+        }
+      }),
+      { numRuns: 400 },
+    );
+  });
+
+  it("accepts exactly the windows that are in the future and in order", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: -600, max: 600 }),
+        fc.option(fc.integer({ min: -600, max: 600 }), { nil: null }),
+        (startMinutes, endMinutes) => {
+          const result = validateScheduleEdit(
+            editPayload({
+              startsAt: isoIn(startMinutes, nowMs),
+              endsAt: endMinutes === null ? null : isoIn(endMinutes, nowMs),
+            }),
+            NOW,
+          );
+
+          const expected =
+            startMinutes > 0 &&
+            (endMinutes === null || endMinutes > startMinutes);
+
+          expect(result.ok).toBe(expected);
+        },
+      ),
+      { numRuns: 400 },
+    );
+  });
+
+  it("agrees with creation on every schedule", () => {
+    // One rule set behind two entry points: a meeting can be edited into exactly
+    // the states it could have been created in.
+    fc.assert(
+      fc.property(
+        fc.integer({ min: -600, max: 600 }),
+        fc.option(fc.integer({ min: -600, max: 600 }), { nil: null }),
+        (startMinutes, endMinutes) => {
+          const startsAt = isoIn(startMinutes, nowMs);
+          const endsAt =
+            endMinutes === null ? null : isoIn(endMinutes, nowMs);
+
+          const edit = validateScheduleEdit(
+            editPayload({ startsAt, endsAt }),
+            NOW,
+          );
+          const create = validateServerInput(
+            serverPayload({ mode: "scheduled", startsAt, endsAt }),
+            NOW,
+          );
+
+          expect(edit.ok).toBe(create.ok);
+        },
+      ),
+      { numRuns: 300 },
+    );
+  });
+});
+
+describe("toDateTimeLocalValue", () => {
+  const dates = fc.date({
+    min: new Date("2000-01-01T00:00:00.000Z"),
+    max: new Date("2100-01-01T00:00:00.000Z"),
+    noInvalidDate: true,
+  });
+
+  it("produces exactly the shape a datetime-local input accepts", () => {
+    fc.assert(
+      fc.property(dates, (date) => {
+        expect(toDateTimeLocalValue(date)).toMatch(
+          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/,
+        );
+      }),
+      { numRuns: 300 },
+    );
+  });
+
+  it("round-trips through the browser's own reading of the input value", () => {
+    // Compared by wall-clock components rather than by instant, so this holds in
+    // any time zone — including across a DST fold, where one wall-clock time names
+    // two different instants.
+    fc.assert(
+      fc.property(dates, (date) => {
+        const reparsed = new Date(toDateTimeLocalValue(date));
+
+        expect(reparsed.getFullYear()).toBe(date.getFullYear());
+        expect(reparsed.getMonth()).toBe(date.getMonth());
+        expect(reparsed.getDate()).toBe(date.getDate());
+        expect(reparsed.getHours()).toBe(date.getHours());
+        expect(reparsed.getMinutes()).toBe(date.getMinutes());
+      }),
+      { numRuns: 300 },
+    );
+  });
+
+  it("formats in local time and drops the seconds the input does not edit", () => {
+    const local = new Date(2026, 9, 10, 9, 5, 42);
+
+    expect(toDateTimeLocalValue(local)).toBe("2026-10-10T09:05");
+    expect(toDateTimeLocalValue(local.toISOString())).toBe("2026-10-10T09:05");
+  });
+
+  it("returns an empty value for anything that is not a real instant", () => {
+    expect(toDateTimeLocalValue("not a date")).toBe("");
+    expect(toDateTimeLocalValue(new Date(Number.NaN))).toBe("");
   });
 });

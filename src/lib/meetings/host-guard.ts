@@ -32,6 +32,15 @@ export interface HostContext {
   /** True only for the meeting owner, false for a co-host. */
   isOwner: boolean;
   /**
+   * True for whoever created the meeting, including after the room has been handed
+   * to a successor.
+   *
+   * Lets a decision that belongs to the person who set the meeting up — such as
+   * rescheduling it — admit them without also admitting co-hosts, which the
+   * "moderator" level alone cannot express.
+   */
+  isCreator: boolean;
+  /**
    * The caller's own LiveKit identity. Needed when an action has to name the
    * moderator who performed it, as the poll actions do.
    */
@@ -111,6 +120,7 @@ export async function requireMeetingHost(
     hostClerkId: acting?.clerkId ?? null,
     localUserId: me.id,
     isOwner,
+    isCreator,
     actorIdentity: me.clerkId,
   };
 }

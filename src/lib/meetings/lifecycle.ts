@@ -94,6 +94,31 @@ export function hasEnded(
 }
 
 /**
+ * Whether a meeting's schedule may still be changed.
+ *
+ * Only a scheduled meeting that has not reached its start. An instant meeting has
+ * no schedule to change, and once the start arrives the meeting is happening —
+ * moving it then would rewrite a time people are already acting on.
+ *
+ * Built on `resolveMeetingStatus` rather than comparing `startsAt` alone, because
+ * a host can end a scheduled meeting before its start time: `endMeeting` stamps
+ * `endsAt` with the moment it ran, which lands *before* `startsAt`. That meeting is
+ * over even though its start is still ahead, and must not be revived by an edit.
+ *
+ * One rule with two callers: the dashboard uses it to decide whether to offer the
+ * control, and the settings action uses it to decide whether to honour it.
+ */
+export function isScheduleEditable(
+  meeting: MeetingLifecycleFields,
+  now: number,
+): boolean {
+  return (
+    timeOf(meeting.startsAt) !== null &&
+    resolveMeetingStatus(meeting, now) === "upcoming"
+  );
+}
+
+/**
  * Sort key for a finished meeting: when it actually stopped.
  *
  * Falls back to the presumed end so meetings that were never closed still order

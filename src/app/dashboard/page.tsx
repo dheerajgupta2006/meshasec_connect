@@ -16,6 +16,7 @@ import { redirect } from "next/navigation";
 
 import {
   groupMeetingsByActivity,
+  isScheduleEditable,
   type MeetingActivity,
 } from "@/lib/meetings/lifecycle";
 import { listActiveRooms } from "@/lib/meetings/livekit-admin";
@@ -27,6 +28,7 @@ import {
   type ContactSummary,
 } from "@/components/connections/contacts-list";
 import { DashboardGroups } from "@/components/groups/dashboard-groups";
+import { MeetingSettingsDialog } from "@/components/meeting/meeting-settings-dialog";
 import { QuickActions } from "@/components/dashboard/quick-actions";
 import { StatusBadge } from "@/components/dashboard/status-badge";
 import { Button } from "@/components/ui/button";
@@ -88,6 +90,15 @@ function MeetingCard({
   const isHost = meeting.host.clerkId === clerkUserId;
   const isPast = activity === "past";
   const isInProgress = activity === "ongoing";
+
+  // The host, and only while the schedule can still move. Listed as upcoming is
+  // not enough on its own: an instant meeting nobody has joined is listed there
+  // too, and has no schedule to change. The settings action enforces the same
+  // rule, so this only decides whether to offer the button.
+  const canManage =
+    isHost &&
+    activity === "upcoming" &&
+    isScheduleEditable(meeting, Date.now());
 
   // "Rejoin" only for a room somebody is actually in. An upcoming meeting has
   // never been open, so offering to rejoin it was simply untrue.
@@ -233,6 +244,14 @@ function MeetingCard({
               endsAt={meeting.endsAt?.toISOString() ?? null}
               tone="dark"
               className="h-9 w-full border-white/15 bg-white/[0.06] text-zinc-200 hover:bg-white/[0.12] hover:text-white"
+            />
+          )}
+
+          {canManage && (
+            <MeetingSettingsDialog
+              meetingCode={meeting.meetingCode}
+              meetingTitle={meeting.title}
+              triggerClassName="h-9 w-full border-white/15 bg-white/[0.06] text-zinc-200 hover:bg-white/[0.12] hover:text-white"
             />
           )}
         </div>

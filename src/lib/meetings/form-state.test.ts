@@ -148,6 +148,7 @@ describe("duplicate submit protection", () => {
         title: "Team sync",
         startsAt: null,
         endsAt: null,
+        passcode: "123456",
       },
     });
 
@@ -237,10 +238,47 @@ describe("announcements", () => {
         title: "Team sync",
         startsAt: null,
         endsAt: null,
+        passcode: "123456",
       },
     });
 
     expect(state.announcement.length).toBeGreaterThan(0);
     expect(state.announcement).not.toBe(loadingAnnouncement);
+  });
+
+  it("tells an instant host the lobby is opening", () => {
+    let state = submit(stateWithDraft(initialFormState.draft), validOutcome());
+    state = meetingCreationReducer(state, {
+      type: "SERVER_SUCCEEDED",
+      result: {
+        meetingCode: "abcdefghijklmnopqrstuv",
+        title: "Team sync",
+        startsAt: null,
+        endsAt: null,
+        passcode: "123456",
+      },
+    });
+
+    expect(state.announcement.toLowerCase()).toContain("lobby");
+  });
+
+  it("tells a scheduled host the details are ready, not that the lobby is opening", () => {
+    // A scheduled meeting stays on the form to show the share popup, so the
+    // announcement must not promise a navigation that never happens.
+    let state = submit(stateWithDraft(initialFormState.draft), validOutcome());
+    state = meetingCreationReducer(state, {
+      type: "SERVER_SUCCEEDED",
+      result: {
+        meetingCode: "abcdefghijklmnopqrstuv",
+        title: "Team sync",
+        startsAt: "2026-10-10T09:30:00.000Z",
+        endsAt: "2026-10-10T10:30:00.000Z",
+        passcode: "123456",
+      },
+    });
+
+    expect(state.status.kind).toBe("success");
+    expect(state.announcement.toLowerCase()).toContain("passcode");
+    expect(state.announcement.toLowerCase()).not.toContain("opening");
   });
 });

@@ -308,38 +308,14 @@ export function validateServerInput(
   // Instant mode discards any submitted schedule input: both columns persist as
   // null (Req 5.9, 5.10).
   if (mode === "scheduled") {
-    const startField = readScheduleField(raw.startsAt);
-    if (startField.kind === "absent") {
-      fieldErrors.startsAt = START_REQUIRED_MESSAGE;
-    } else if (startField.kind === "invalid") {
-      fieldErrors.startsAt = START_AMBIGUOUS_MESSAGE;
-    } else {
-      const parsedStart = parseIso8601Instant(startField.raw);
-      if (parsedStart === null) {
-        fieldErrors.startsAt = START_AMBIGUOUS_MESSAGE;
-      } else if (parsedStart.getTime() <= now.getTime()) {
-        fieldErrors.startsAt = START_NOT_FUTURE_MESSAGE;
-      } else {
-        startsAt = parsedStart;
-      }
-    }
-
-    const endField = readScheduleField(raw.endsAt);
-    if (endField.kind === "invalid") {
-      fieldErrors.endsAt = END_AMBIGUOUS_MESSAGE;
-    } else if (endField.kind === "present") {
-      const parsedEnd = parseIso8601Instant(endField.raw);
-      if (parsedEnd === null) {
-        fieldErrors.endsAt = END_AMBIGUOUS_MESSAGE;
-      } else if (
-        startsAt !== null &&
-        parsedEnd.getTime() <= startsAt.getTime()
-      ) {
-        fieldErrors.endsAt = END_NOT_AFTER_START_MESSAGE;
-      } else {
-        endsAt = parsedEnd;
-      }
-    }
+    const schedule = readScheduleWindow(
+      raw.startsAt,
+      raw.endsAt,
+      now,
+      fieldErrors,
+    );
+    startsAt = schedule.startsAt;
+    endsAt = schedule.endsAt;
   }
 
   if (formMessage !== null || hasAnyFieldError(fieldErrors)) {
@@ -363,6 +339,97 @@ export function validateServerInput(
       creationRequestId,
     },
   };
+}
+
+/** A host's change to a meeting that has not started yet. */
+export interface NormalizedScheduleEdit {
+  normalizedTitle: string;
+  startsAt: Date;
+  /** Null clears the end time, which is how "no end time set" is chosen. */
+  endsAt: Date | null;
+}
+
+/**
+ * Authoritative pass for rescheduling.
+ *
+ * Applies exactly the creation rules — the same title rules and the same
+ * schedule rules, through the same helpers — because a meeting that could be
+ * edited into a state it could not have been created in would be a back door
+ * around every check `validateServerInput` makes. A start in the past is refused
+ * here just as it is on creation, which is also what stops a host moving a
+ * meeting backwards into history.
+ *
+ * There is no `mode`: an edit is only ever offered for a scheduled meeting, so a
+ * start time is always required.
+ */
+export function validateScheduleEdit(
+  raw: unknown,
+  now: Date,
+): ValidationOutcome<NormalizedScheduleEdit> {
+  if (!isRecord(raw)) {
+    return { ok: false, fieldErrors: {}, formMessage: MALFORMED_PAYLOAD_MESSAGE };
+  }
+  // The meeting being edited is named by the action's own argument. A payload
+  // that also tries to carry a meeting code or a host is rejected outright.
+  if (findForbiddenKey(raw) !== null) {
+    return { ok: false, fieldErrors: {}, formMessage: FORBIDDEN_KEY_MESSAGE };
+  }
+
+  const fieldErrors: FieldErrors = {};
+
+  let normalizedTitle: string | null = null;
+  if (typeof raw.title === "string") {
+    normalizedTitle = readTitle(raw.title, fieldErrors);
+  } else {
+    fieldErrors.title = TITLE_REQUIRED_MESSAGE;
+  }
+
+  const schedule = readScheduleWindow(raw.startsAt, raw.endsAt, now, fieldErrors);
+
+  if (hasAnyFieldError(fieldErrors)) {
+    return { ok: false, fieldErrors, formMessage: FIX_FIELDS_MESSAGE };
+  }
+  if (normalizedTitle === null || schedule.startsAt === null) {
+    return { ok: false, fieldErrors, formMessage: MALFORMED_PAYLOAD_MESSAGE };
+  }
+
+  return {
+    ok: true,
+    value: {
+      normalizedTitle,
+      startsAt: schedule.startsAt,
+      endsAt: schedule.endsAt,
+    },
+  };
+}
+
+/**
+ * Formats an instant for `<input type="datetime-local">` in the browser's own time
+ * zone. The inverse of the parsing `validateClientInput` does on the way out.
+ *
+ * Minute precision, because that is what the input edits: carrying seconds makes
+ * the field render an unexpected ":00" in some browsers and fail its own
+ * validation in others.
+ *
+ * Browser-only in practice. Run on the server it would format in the server's
+ * zone — UTC on Vercel — and prefill the edit form five and a half hours early for
+ * a host in India.
+ *
+ * Returns an empty string, which the input treats as "no value", for anything that
+ * is not a real instant.
+ */
+export function toDateTimeLocalValue(value: Date | string): string {
+  const date = typeof value === "string" ? new Date(value) : value;
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const two = (part: number) => String(part).padStart(2, "0");
+
+  return `${String(date.getFullYear()).padStart(4, "0")}-${two(
+    date.getMonth() + 1,
+  )}-${two(date.getDate())}T${two(date.getHours())}:${two(date.getMinutes())}`;
 }
 
 function readTitle(rawTitle: string, fieldErrors: FieldErrors): string | null {
@@ -411,6 +478,66 @@ function readScheduleField(value: unknown): ScheduleField {
   }
   const trimmed = value.trim();
   return trimmed.length === 0 ? { kind: "absent" } : { kind: "present", raw: trimmed };
+}
+
+interface ScheduleWindow {
+  startsAt: Date | null;
+  endsAt: Date | null;
+}
+
+/**
+ * The schedule rules, in one place: a required start that is an unambiguous
+ * future instant, and an optional end strictly after it.
+ *
+ * Extracted from `validateServerInput` so that rescheduling runs these exact
+ * checks rather than a second copy of them. Two copies of a validation rule drift,
+ * and the copy that drifts is the one that lets a bad value through.
+ *
+ * Writes into `fieldErrors` and returns null for any field it refused.
+ */
+function readScheduleWindow(
+  rawStart: unknown,
+  rawEnd: unknown,
+  now: Date,
+  fieldErrors: FieldErrors,
+): ScheduleWindow {
+  let startsAt: Date | null = null;
+  let endsAt: Date | null = null;
+
+  const startField = readScheduleField(rawStart);
+  if (startField.kind === "absent") {
+    fieldErrors.startsAt = START_REQUIRED_MESSAGE;
+  } else if (startField.kind === "invalid") {
+    fieldErrors.startsAt = START_AMBIGUOUS_MESSAGE;
+  } else {
+    const parsedStart = parseIso8601Instant(startField.raw);
+    if (parsedStart === null) {
+      fieldErrors.startsAt = START_AMBIGUOUS_MESSAGE;
+    } else if (parsedStart.getTime() <= now.getTime()) {
+      fieldErrors.startsAt = START_NOT_FUTURE_MESSAGE;
+    } else {
+      startsAt = parsedStart;
+    }
+  }
+
+  const endField = readScheduleField(rawEnd);
+  if (endField.kind === "invalid") {
+    fieldErrors.endsAt = END_AMBIGUOUS_MESSAGE;
+  } else if (endField.kind === "present") {
+    const parsedEnd = parseIso8601Instant(endField.raw);
+    if (parsedEnd === null) {
+      fieldErrors.endsAt = END_AMBIGUOUS_MESSAGE;
+    } else if (
+      startsAt !== null &&
+      parsedEnd.getTime() <= startsAt.getTime()
+    ) {
+      fieldErrors.endsAt = END_NOT_AFTER_START_MESSAGE;
+    } else {
+      endsAt = parsedEnd;
+    }
+  }
+
+  return { startsAt, endsAt };
 }
 
 /**

@@ -62,6 +62,7 @@ interface MeetingProjection {
   title: string;
   startsAt: Date | null;
   endsAt: Date | null;
+  passcode: string | null;
 }
 
 export async function createMeeting(
@@ -167,6 +168,7 @@ async function runAttemptLoop(
               title: true,
               startsAt: true,
               endsAt: true,
+              passcode: true,
             },
           });
 
@@ -337,6 +339,9 @@ async function readCommittedResult(
           title: true,
           startsAt: true,
           endsAt: true,
+          // A replay has to carry it too, or a retried submit would show the host
+          // a popup with the passcode missing.
+          passcode: true,
         },
       },
     },
@@ -351,6 +356,7 @@ function toCreationResult(meeting: MeetingProjection): CreationResult {
     title: meeting.title,
     startsAt: meeting.startsAt === null ? null : meeting.startsAt.toISOString(),
     endsAt: meeting.endsAt === null ? null : meeting.endsAt.toISOString(),
+    passcode: meeting.passcode,
   };
 }
 

@@ -46,6 +46,19 @@ export interface CreationResult {
   title: string;
   startsAt: string | null;
   endsAt: string | null;
+  /**
+   * The room passcode, returned so the host can share it the moment the meeting
+   * exists. Guests without an account need it to get past the lobby.
+   *
+   * Safe to include because this result only ever reaches the person who created
+   * the meeting: a replay is keyed on their own Clerk subject and their own
+   * creation request id. Before this, a scheduled meeting's passcode could only be
+   * read from inside the call, which is too late to put it in an invitation.
+   *
+   * Null only for rooms created before passcodes existed, which this path no
+   * longer produces.
+   */
+  passcode: string | null;
 }
 
 /**
