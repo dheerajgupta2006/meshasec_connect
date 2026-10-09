@@ -7,6 +7,10 @@ import {
   recordAttendance,
 } from "@/lib/meetings/authorization";
 import {
+  markDirectCallExpanded,
+  markDirectCallExpandedByParticipant,
+} from "@/lib/meetings/direct-call";
+import {
   attributedAccountDisplayName,
   validateMeetingDisplayName,
 } from "@/lib/meetings/display-name";
@@ -161,7 +165,7 @@ async function issueGuestAccessToken(
   // new arrivals out.
   const meeting = await prisma.meeting.findUnique({
     where: { meetingCode },
-    select: { isLocked: true },
+    select: { id: true, isLocked: true },
   });
 
   if (meeting === null) {
@@ -195,6 +199,11 @@ async function issueGuestAccessToken(
       { status: 403 },
     );
   }
+
+  // A guest is necessarily outside an account-to-account direct pair. Stamp the
+  // expansion before minting, so there is no instant where they can enter while
+  // room chat is still copied into the original pair's private DM.
+  await markDirectCallExpanded(meeting.id);
 
   const identity = guestIdentity(session.guestId);
   const requestedName = validateMeetingDisplayName(
@@ -367,6 +376,9 @@ export async function POST(request: Request): Promise<NextResponse> {
     // host succession think the host was absent and hand the role to the first
     // person who joined. `recordAttendance` upserts, so this is idempotent.
     await recordAttendance(decision.meeting.id, me.id);
+    // No-op for either original endpoint and every non-direct meeting; stamps a
+    // passcode-admitted third account before their token is issued.
+    await markDirectCallExpandedByParticipant(decision.meeting.id, me.id);
 
     // A meeting-scoped alias is accepted, but never without attribution. The old
     // route ignored this field entirely, which made the editable lobby control a

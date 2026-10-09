@@ -411,6 +411,20 @@ export async function decideWaitingRoom(
   }
 
   await prisma.$transaction([
+    // First on purpose: this UPDATE locks the Meeting row and permanently closes
+    // the direct-call-to-DM bridge before the outsider's enrollment can exist.
+    // The DirectMessage insert trigger takes a conflicting SHARE lock, so either
+    // the message commits before admission or it sees expansion and is refused —
+    // there is no check/insert gap.
+    prisma.meeting.updateMany({
+      where: {
+        id: host.meetingId,
+        directCallPeerId: { not: null },
+        directCallExpandedAt: null,
+        NOT: [{ hostId: userId }, { directCallPeerId: userId }],
+      },
+      data: { directCallExpandedAt: new Date() },
+    }),
     prisma.waitingRoomEntry.update({
       where: { id: entry.id },
       data: { status: KnockStatus.ADMITTED, decidedById: host.localUserId },

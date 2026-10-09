@@ -387,16 +387,29 @@ export async function startDirectCall(
     return { ok: false, message: throttled, meetingCode: null };
   }
 
-  // Reuse a recent call between exactly these two people instead of opening a
-  // second room. Without this, both pressing "Call" lands them in separate
-  // meetings, each waiting for someone who is elsewhere.
+  // Reuse only a recent, still-active, unexpanded direct room for this exact
+  // immutable pair. The old query matched any private meeting where one endpoint
+  // happened to be host and the other appeared somewhere in attendance — which
+  // could select a private group call, an expanded call, an invite-only meeting,
+  // or even one that had already ended.
   const existing = await prisma.meeting.findFirst({
     where: {
       isPrivate: true,
+      groupId: null,
+      endsAt: null,
+      directCallExpandedAt: null,
       createdAt: { gte: new Date(Date.now() - CALL_REUSE_WINDOW_MS) },
       OR: [
-        { hostId: me.id, participants: { some: { userId: contact.id } } },
-        { hostId: contact.id, participants: { some: { userId: me.id } } },
+        { hostId: me.id, directCallPeerId: contact.id },
+        { hostId: contact.id, directCallPeerId: me.id },
+      ],
+      // Removal deletes the participant row. Do not reuse a room that has barred
+      // either endpoint; a fresh call gets a fresh authorization boundary.
+      AND: [
+        { participants: { some: { userId: me.id } } },
+        { participants: { some: { userId: contact.id } } },
+        // Defence against an enrollment path that failed to stamp expansion.
+        { participants: { every: { userId: { in: [me.id, contact.id] } } } },
       ],
     },
     select: { id: true, meetingCode: true },
@@ -443,6 +456,10 @@ export async function startDirectCall(
           // The room PIN is what lets this 1-on-1 be widened later. A guest with
           // the link still cannot enter a private room without it.
           passcode: generateRoomPasscode(),
+          // Immutable provenance for call-chat persistence. `hostId` is one
+          // endpoint and this is the other; generic and group meetings leave it
+          // null, so neither can ever be mistaken for a DM-backed call.
+          directCallPeerId: contact.id,
           participants: {
             create: [{ userId: me.id }, { userId: contact.id }],
           },
@@ -718,6 +735,20 @@ export async function inviteFriendToCall(
 
   try {
     await prisma.$transaction([
+      // A third-person invite permanently changes the confidentiality boundary.
+      // Stamp it in the same transaction as enrollment so there is no instant
+      // where the new member exists but room chat still writes into the original
+      // pair's private DM. Re-inviting either original endpoint matches neither
+      // NOT clause and leaves a true 1-on-1 eligible.
+      prisma.meeting.updateMany({
+        where: {
+          id: decision.meeting.id,
+          directCallPeerId: { not: null },
+          directCallExpandedAt: null,
+          NOT: [{ hostId: friend.id }, { directCallPeerId: friend.id }],
+        },
+        data: { directCallExpandedAt: new Date() },
+      }),
       prisma.participant.upsert({
         where: {
           userId_meetingId: {

@@ -31,20 +31,22 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  hostedMeetings      Meeting[]           @relation("MeetingHost")
-  participations      Participant[]
-  sentRequests        ConnectionRequest[] @relation("ConnectionSender")
-  receivedRequests    ConnectionRequest[] @relation("ConnectionReceiver")
-  sentMessages        DirectMessage[]     @relation("MessageSender")
-  receivedMessages    DirectMessage[]     @relation("MessageReceiver")
-  sentCallInvites     CallInvite[]        @relation("CallInviteSender")
-  receivedCallInvites CallInvite[]        @relation("CallInviteReceiver")
-  waitingRoomEntries  WaitingRoomEntry[]  @relation("WaitingGuest")
-  currentlyHosting    Meeting[]           @relation("MeetingCurrentHost")
-  pushSubscriptions   PushSubscription[]
-  ownedGroups         Group[]             @relation("GroupOwner")
-  groupMemberships    GroupMember[]
-  sentGroupMessages   GroupMessage[]      @relation("GroupMessageSender")
+  hostedMeetings         Meeting[]           @relation("MeetingHost")
+  participations         Participant[]
+  sentRequests           ConnectionRequest[] @relation("ConnectionSender")
+  receivedRequests       ConnectionRequest[] @relation("ConnectionReceiver")
+  sentMessages           DirectMessage[]     @relation("MessageSender")
+  receivedMessages       DirectMessage[]     @relation("MessageReceiver")
+  sentCallInvites        CallInvite[]        @relation("CallInviteSender")
+  receivedCallInvites    CallInvite[]        @relation("CallInviteReceiver")
+  waitingRoomEntries     WaitingRoomEntry[]  @relation("WaitingGuest")
+  currentlyHosting       Meeting[]           @relation("MeetingCurrentHost")
+  pushSubscriptions      PushSubscription[]
+  ownedGroups            Group[]             @relation("GroupOwner")
+  groupMemberships       GroupMember[]
+  sentGroupMessages      GroupMessage[]      @relation("GroupMessageSender")
+  /// Meetings where this user is the immutable other endpoint of a direct call.
+  directCallPeerMeetings Meeting[]           @relation("MeetingDirectCallPeer")
 }
 
 /// A browser's push endpoint, so a call can reach someone whose tab is closed.
@@ -104,6 +106,12 @@ model DirectMessage {
   /// body.
   attachment DirectMessageAttachment?
 
+  /// Set only for content authored in a direct call. The database trigger created
+  /// by the provenance migration locks and validates the meeting at insert time,
+  /// making the no-expansion confidentiality check atomic with this write.
+  sourceMeetingId String?
+  sourceMeeting   Meeting? @relation("DirectMessageSourceMeeting", fields: [sourceMeetingId], references: [id], onDelete: SetNull)
+
   sender   User @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
   receiver User @relation("MessageReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
 
@@ -111,6 +119,7 @@ model DirectMessage {
   @@index([senderId, receiverId, createdAt])
   @@index([receiverId, readAt])
   @@index([replyToId])
+  @@index([sourceMeetingId])
 }
 
 /// How an attachment is served.
@@ -290,17 +299,17 @@ model ConnectionRequest {
 }
 
 model Meeting {
-  id                 String                  @id @default(cuid())
-  title              String
-  hostId             String
-  meetingCode        String                  @unique
-  createdAt          DateTime                @default(now())
-  startsAt           DateTime?
-  endsAt             DateTime?
+  id                   String                  @id @default(cuid())
+  title                String
+  hostId               String
+  meetingCode          String                  @unique
+  createdAt            DateTime                @default(now())
+  startsAt             DateTime?
+  endsAt               DateTime?
   /// PRIVATE meetings admit only the host and enrolled participants, so a
   /// leaked code is not enough to join. Direct 1-on-1 calls are private; a
   /// meeting created to be shared by link is not.
-  isPrivate          Boolean                 @default(false)
+  isPrivate            Boolean                 @default(false)
   /// Six-digit room PIN for guests who are not enrolled participants.
   ///
   /// Stored in the clear on purpose: the host UI has to *display* it to share
@@ -308,13 +317,13 @@ model Meeting {
   /// not a credential — admission still requires a signed-in Clerk session, and
   /// `authorizeMeetingJoin` rate limits attempts so six digits cannot be walked.
   /// Nullable because meetings created before this column existed have none.
-  passcode           String?
+  passcode             String?
   /// When true, nobody new may mint a token. Existing participants are
   /// unaffected, so locking does not eject the people already talking.
-  isLocked           Boolean                 @default(false)
+  isLocked             Boolean                 @default(false)
   /// When true, a non-participant who clears the passcode is placed in the
   /// waiting room instead of being admitted, and needs the host to let them in.
-  waitingRoomEnabled Boolean                 @default(false)
+  waitingRoomEnabled   Boolean                 @default(false)
   /// Whoever is running the meeting right now.
   ///
   /// Separate from `hostId`, which records who created it and never changes —
@@ -323,27 +332,41 @@ model Meeting {
   /// talking, it transfers to the longest-present participant so the room is
   /// never left without moderation. Null means nobody has taken over, so the
   /// creator is still the acting host.
-  currentHostId      String?
+  currentHostId        String?
   /// The group this call belongs to, or null for a 1-on-1 or a link meeting.
   ///
   /// `SetNull` rather than `Cascade`: deleting a group must not erase the
   /// attendance history of calls that happened in it. The meeting simply stops
   /// being attributed to a group.
-  groupId            String?
-  group              Group?                  @relation(fields: [groupId], references: [id], onDelete: SetNull)
-  currentHost        User?                   @relation("MeetingCurrentHost", fields: [currentHostId], references: [id], onDelete: SetNull)
-  host               User                    @relation("MeetingHost", fields: [hostId], references: [id], onDelete: Cascade)
-  participants       Participant[]
-  callInvites        CallInvite[]
-  knocks             WaitingRoomEntry[]
-  guestKnocks        GuestWaitingEntry[]
-  guestBans          MeetingGuestBan[]
-  creationRequest    MeetingCreationRequest?
+  groupId              String?
+  group                Group?                  @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  /// Immutable other endpoint of a call created by `startDirectCall`.
+  ///
+  /// `hostId` is the creator endpoint. Keeping the peer explicitly is the only
+  /// safe way to distinguish a true contact call from a private group or invite
+  /// meeting; participant rows are attendance and can grow over time.
+  directCallPeerId     String?
+  directCallPeer       User?                   @relation("MeetingDirectCallPeer", fields: [directCallPeerId], references: [id], onDelete: SetNull)
+  /// Set permanently the first time the original pair widens the room to anyone
+  /// else. Call-chat persistence stops at that point so content visible to a group
+  /// is never copied into the original pair's private DM.
+  directCallExpandedAt DateTime?
+  currentHost          User?                   @relation("MeetingCurrentHost", fields: [currentHostId], references: [id], onDelete: SetNull)
+  host                 User                    @relation("MeetingHost", fields: [hostId], references: [id], onDelete: Cascade)
+  participants         Participant[]
+  callInvites          CallInvite[]
+  knocks               WaitingRoomEntry[]
+  guestKnocks          GuestWaitingEntry[]
+  guestBans            MeetingGuestBan[]
+  creationRequest      MeetingCreationRequest?
+  directMessages       DirectMessage[]         @relation("DirectMessageSourceMeeting")
 
   @@index([hostId])
   @@index([currentHostId])
   /// Serves the per-group call-reuse lookup, which filters by group and recency.
   @@index([groupId, createdAt])
+  /// Exact active direct-pair lookup and call-chat persistence gate.
+  @@index([hostId, directCallPeerId, directCallExpandedAt, createdAt], map: "Meeting_direct_call_active_idx")
 }
 
 /// A mid-call invitation that turns a 1-on-1 into a group call.
