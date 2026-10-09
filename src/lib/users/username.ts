@@ -14,7 +14,15 @@ export const FALLBACK_USERNAME_BASE = "user";
 
 /** Normalizes anything a person might type into a comparable handle. */
 export function normalizeUsername(raw: string): string {
-  return raw.trim().replace(/^@+/, "").toLowerCase();
+  // Trim again after each leading decoration. Without that second trim,
+  // `"@ !"` normalized to `" !"`, and normalizing the result a second time
+  // changed it to `"!"`. Treating whitespace between pasted `@` decorations as
+  // part of the decoration keeps lookup normalization idempotent.
+  return raw
+    .trim()
+    .replace(/^(?:@\s*)+/, "")
+    .trim()
+    .toLowerCase();
 }
 
 /**

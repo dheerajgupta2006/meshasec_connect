@@ -83,6 +83,11 @@ export default async function ThreadPage({ params }: ThreadPageProps) {
     body: message.body,
     createdAt: message.createdAt.toISOString(),
     outgoing: message.outgoing,
+    // Both carried on first paint rather than left to the first poll: an
+    // attachment with no caption has an empty body, and without these it would
+    // render as an empty bubble until the poll landed.
+    deleted: message.deleted,
+    attachment: message.attachment,
   }));
 
   return (

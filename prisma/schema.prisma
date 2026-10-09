@@ -99,6 +99,11 @@ model DirectMessage {
   replyTo   DirectMessage?  @relation("MessageReply", fields: [replyToId], references: [id], onDelete: SetNull)
   replies   DirectMessage[] @relation("MessageReply")
 
+  /// A file or image sent with the message. When present, `body` is an optional
+  /// caption and may be empty — the only case where a live message has an empty
+  /// body.
+  attachment DirectMessageAttachment?
+
   sender   User @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
   receiver User @relation("MessageReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
 
@@ -106,6 +111,48 @@ model DirectMessage {
   @@index([senderId, receiverId, createdAt])
   @@index([receiverId, readAt])
   @@index([replyToId])
+}
+
+/// How an attachment is served.
+enum AttachmentKind {
+  /// Rendered inline in the thread.
+  IMAGE
+  /// Only ever offered as a download.
+  FILE
+}
+
+/// A file or image attached to a direct message.
+///
+/// Its own table rather than columns on `DirectMessage`, for two reasons. The
+/// thread is polled every few seconds, and keeping the bytes elsewhere means that
+/// poll never reads them. And a soft delete keeps the message row for reply
+/// context, but the attachment row — the privacy-sensitive part — is purged.
+///
+/// The bytes live in Postgres because the deployment has no object store. Every
+/// read goes through the message's participants and connection gate, so access
+/// control is the same query as the data.
+model DirectMessageAttachment {
+  id        String         @id @default(cuid())
+  /// One attachment per message, created in the same write as the message.
+  messageId String         @unique
+  kind      AttachmentKind
+  /// Sanitised display name. A label only — never used as a path.
+  fileName  String
+  /// Decided by the server from the bytes, never taken from the client.
+  mimeType  String
+  sizeBytes Int
+  /// Image dimensions from the file header, so the thread can reserve space.
+  width     Int?
+  height    Int?
+  /// SHA-256 of the bytes, used as the HTTP entity tag.
+  sha256    String
+  data      Bytes
+  createdAt DateTime       @default(now())
+
+  message DirectMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  /// Serves the per-sender daily upload budget, which sums recent sizes.
+  @@index([createdAt])
 }
 
 /// Cached OpenGraph metadata for a URL shared in a message.

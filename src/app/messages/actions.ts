@@ -3,61 +3,36 @@
 /**
  * Server Actions for direct messaging.
  *
- * The connection gate lives here, not in the UI: an ACCEPTED connection is
- * re-verified on every send, so revoking a connection immediately closes the
+ * The connection gate lives server-side, not in the UI: an ACCEPTED connection
+ * is re-verified on every send, so revoking a connection immediately closes the
  * ability to write.
+ *
+ * Writing a message is delegated to `lib/messages/send.ts`, which the attachment
+ * upload route uses too, so the gates are defined exactly once.
  */
 
-import { Prisma } from "@prisma/client";
 import { revalidatePath } from "next/cache";
 
 import { areUsersConnected } from "@/lib/connections/queries";
+import {
+  isMissingAttachmentSchema,
+  loadAttachmentSummaries,
+  purgeAttachment,
+} from "@/lib/messages/attachments";
 import { searchMessages } from "@/lib/messages/queries";
+import {
+  SIGN_IN_REQUIRED,
+  checkMessageWriteQuota,
+  deliverDirectMessage,
+  messageAttemptExists,
+  notConnectedMessage,
+  validateMessageBody,
+  type MessageActionResult,
+  type SendMessageResult,
+} from "@/lib/messages/send";
 import { prisma } from "@/lib/prisma";
-import { pushConfigured, sendPushToUser } from "@/lib/push/send";
-import { consumeRateLimit, describeRetryAfter } from "@/lib/rate-limit";
 import { ensureCurrentUser } from "@/lib/users/current-user";
 
-/** Bounds the idempotency key so it cannot be used to store bulk data. */
-const MAX_CLIENT_ID_CHARS = 64;
-
-/** Keeps a push notification body to a glanceable length. */
-const PUSH_PREVIEW_CHARS = 120;
-
-export interface MessageActionResult {
-  ok: boolean;
-  message: string;
-}
-
-/**
- * The committed row, shaped exactly like the thread's wire format.
- *
- * Returned so the client can swap its optimistic bubble for the real message
- * without a follow-up fetch. Before this, a send cost four serialized requests
- * (action, poll, mark-read, refresh) before the text appeared at all.
- */
-export interface SentMessageView {
-  id: string;
-  body: string;
-  createdAt: string;
-  outgoing: boolean;
-  editedAt: string | null;
-  deleted: boolean;
-  replyTo: {
-    id: string;
-    body: string | null;
-    deleted: boolean;
-    outgoing: boolean;
-  } | null;
-}
-
-export interface SendMessageResult extends MessageActionResult {
-  /** Present only when `ok`; null on every refusal. */
-  sent: SentMessageView | null;
-}
-
-const MAX_BODY_CHARS = 4000;
-const SIGN_IN_REQUIRED = "Your session has ended. Sign in again to continue.";
 /**
  * Deliberately identical for "not yours" and "does not exist".
  *
@@ -66,50 +41,13 @@ const SIGN_IN_REQUIRED = "Your session has ended. Sign in again to continue.";
  */
 const NOT_YOURS = "You can only change messages you sent.";
 
-function notConnectedMessage(username: string): string {
-  return `You must connect with @${username} and have your request accepted before calling or chatting.`;
-}
-
-/** Shared trim-and-bound check, so editing enforces exactly what sending does. */
-function validateBody(
-  rawBody: string,
-): { ok: true; body: string } | { ok: false; message: string } {
-  const body = rawBody.trim();
-
-  if (body.length === 0) {
-    return { ok: false, message: "Write a message first." };
-  }
-
-  if (body.length > MAX_BODY_CHARS) {
-    return {
-      ok: false,
-      message: `Messages are limited to ${MAX_BODY_CHARS} characters.`,
-    };
-  }
-
-  return { ok: true, body };
-}
-
-/**
- * Edits, deletes and sends all share the `directMessage` bucket.
- *
- * One bucket per person covers every write to the message table, which is the
- * behaviour worth bounding; splitting it would need a new rule in
- * `lib/rate-limit.ts`.
- */
+/** The quota check, without the retry hint a Server Action has no header for. */
 function checkWriteQuota(userId: string): MessageActionResult | null {
-  const throttled = consumeRateLimit("directMessage", userId);
+  const throttled = checkMessageWriteQuota(userId);
 
-  if (throttled.allowed) {
-    return null;
-  }
-
-  return {
-    ok: false,
-    message: `You are sending messages too quickly. Try again in ${describeRetryAfter(
-      throttled.retryAfterSeconds,
-    )}.`,
-  };
+  return throttled === null
+    ? null
+    : { ok: false, message: throttled.message };
 }
 
 function revalidateThread(username: string | null): void {
@@ -120,6 +58,7 @@ function revalidateThread(username: string | null): void {
   }
 }
 
+/** Sends a text message. Attachments go through `/api/direct-messages/attachments`. */
 export async function sendDirectMessage(
   recipientId: string,
   rawBody: string,
@@ -132,175 +71,29 @@ export async function sendDirectMessage(
     return { ok: false, message: SIGN_IN_REQUIRED, sent: null };
   }
 
-  const throttled = checkWriteQuota(me.id);
-
-  if (throttled !== null) {
-    return { ...throttled, sent: null };
-  }
-
-  const validated = validateBody(rawBody);
+  const validated = validateMessageBody(rawBody);
 
   if (!validated.ok) {
     return { ok: false, message: validated.message, sent: null };
   }
 
-  const body = validated.body;
+  // A replay of a committed idempotency key performs no write. Do not let a
+  // response lost in transit turn a successful send into a rate-limit error.
+  if (!(await messageAttemptExists(me.id, clientId))) {
+    const throttled = checkWriteQuota(me.id);
 
-  if (recipientId === me.id) {
-    return { ok: false, message: "You cannot message yourself.", sent: null };
-  }
-
-  // Run in parallel: the connection check keys on `recipientId`, which is already
-  // known, so it never needed the profile lookup to finish first. This was two
-  // serialized round trips to Neon for no reason.
-  const [recipient, connected] = await Promise.all([
-    prisma.user.findUnique({
-      where: { id: recipientId },
-      select: { id: true, username: true },
-    }),
-    areUsersConnected(me.id, recipientId),
-  ]);
-
-  if (recipient === null) {
-    return { ok: false, message: "That person no longer exists.", sent: null };
-  }
-
-  if (!connected) {
-    return {
-      ok: false,
-      message: notConnectedMessage(recipient.username ?? "this user"),
-      sent: null,
-    };
-  }
-
-  const idempotencyKey =
-    typeof clientId === "string" && clientId.trim().length > 0
-      ? clientId.trim().slice(0, MAX_CLIENT_ID_CHARS)
-      : null;
-
-  // A quote is a client-supplied id, so it is checked against this exact pair of
-  // people. Without that, anyone could quote a message out of a conversation
-  // they are not part of and have its text rendered back to them.
-  let quotedId: string | null = null;
-  let quotedView: SentMessageView["replyTo"] = null;
-
-  if (typeof replyToId === "string" && replyToId.trim().length > 0) {
-    const quoted = await prisma.directMessage.findUnique({
-      where: { id: replyToId.trim() },
-      // `body` and `deletedAt` come along so the reply can be rendered from this
-      // response alone, rather than costing the client another fetch.
-      select: {
-        id: true,
-        senderId: true,
-        receiverId: true,
-        body: true,
-        deletedAt: true,
-      },
-    });
-
-    if (quoted === null) {
-      return {
-        ok: false,
-        message: "That message no longer exists.",
-        sent: null,
-      };
-    }
-
-    const participants = [quoted.senderId, quoted.receiverId];
-    const sameConversation =
-      participants.includes(me.id) && participants.includes(recipient.id);
-
-    if (!sameConversation) {
-      return {
-        ok: false,
-        message: "You can only quote a message from this conversation.",
-        sent: null,
-      };
-    }
-
-    // A soft-deleted original is still a valid target: the reply renders
-    // "Original message deleted" rather than losing its context.
-    quotedId = quoted.id;
-    quotedView = {
-      id: quoted.id,
-      body: quoted.deletedAt === null ? quoted.body : null,
-      deleted: quoted.deletedAt !== null,
-      outgoing: quoted.senderId === me.id,
-    };
-  }
-
-  let created: { id: string; createdAt: Date } | null = null;
-
-  try {
-    created = await prisma.directMessage.create({
-      data: {
-        senderId: me.id,
-        receiverId: recipient.id,
-        body,
-        clientId: idempotencyKey,
-        replyToId: quotedId,
-      },
-      select: { id: true, createdAt: true },
-    });
-  } catch (error: unknown) {
-    // A retry or double-tap carrying the same key hits the unique index. The
-    // first write already succeeded, so this is a success from the caller's
-    // point of view rather than an error to surface.
-    const isDuplicate =
-      error instanceof Prisma.PrismaClientKnownRequestError &&
-      error.code === "P2002";
-
-    if (!isDuplicate) {
-      throw error;
-    }
-
-    // The winning row is the one to report back, so a retry resolves to the same
-    // message the client already has rather than a second bubble.
-    if (idempotencyKey !== null) {
-      created = await prisma.directMessage.findFirst({
-        where: { senderId: me.id, clientId: idempotencyKey },
-        select: { id: true, createdAt: true },
-      });
+    if (throttled !== null) {
+      return { ...throttled, sent: null };
     }
   }
 
-  // Deliberately awaited, not floated. A promise left running after a Server
-  // Action returns is killed by the serverless runtime, so a fire-and-forget push
-  // would be delivered only sometimes. The client no longer waits on this
-  // response — it renders the message optimistically — so the cost is invisible.
-  if (pushConfigured()) {
-    await sendPushToUser(recipient.id, {
-      kind: "message",
-      fromName: me.name ?? `@${me.username}`,
-      fromUsername: me.username,
-      preview:
-        body.length > PUSH_PREVIEW_CHARS
-          ? `${body.slice(0, PUSH_PREVIEW_CHARS - 1)}…`
-          : body,
-    }).catch(() => undefined);
-  }
-
-  // Only the conversation list and the header's unread badge depend on server
-  // state here, and both are `noStore()` so they re-read on navigation anyway.
-  // Revalidating forced a full RSC re-render of this thread page into the action
-  // response — several more round trips to Singapore for a payload the client
-  // discards, since the thread owns its own message state.
-  return {
-    ok: true,
-    message: "Sent.",
-    sent:
-      created === null
-        ? null
-        : {
-            id: created.id,
-            body,
-            createdAt: created.createdAt.toISOString(),
-            outgoing: true,
-            editedAt: null,
-            deleted: false,
-            replyTo: quotedView,
-          },
-  };
+  return deliverDirectMessage(me, {
+    recipientId,
+    body: validated.body,
+    clientId,
+    replyToId,
+    attachment: null,
+  });
 }
 
 /**
@@ -308,7 +101,8 @@ export async function sendDirectMessage(
  *
  * Ownership is resolved from the row, never from the caller, and the connection
  * gate is re-checked exactly as it is on send — losing the connection closes
- * editing too.
+ * editing too. On an attachment this edits the caption; the file itself cannot
+ * be changed.
  */
 export async function editDirectMessage(
   messageId: string,
@@ -326,7 +120,11 @@ export async function editDirectMessage(
     return throttled;
   }
 
-  const validated = validateBody(newBody);
+  // Empty text is valid only when the existing message has an attachment: it
+  // means "remove the caption", not "turn a text message into an empty bubble".
+  // Length and trimming can be checked before loading the row; the attachment
+  // condition is checked once ownership is known below.
+  const validated = validateMessageBody(newBody, { allowEmpty: true });
 
   if (!validated.ok) {
     return { ok: false, message: validated.message };
@@ -362,9 +160,19 @@ export async function editDirectMessage(
   }
 
   // Saving identical text is a no-op rather than a write, so re-submitting an
-  // unchanged draft cannot stamp a message as edited.
+  // unchanged draft cannot stamp a message as edited. This also keeps an
+  // already-empty attachment caption editable during a rolling deployment if
+  // its attachment table is not visible to this instance yet.
   if (validated.body === existing.body) {
     return { ok: true, message: "No changes." };
+  }
+
+  if (validated.body.length === 0) {
+    const attachments = await loadAttachmentSummaries([existing.id]);
+
+    if (!attachments.has(existing.id)) {
+      return { ok: false, message: "Write a message first." };
+    }
   }
 
   await prisma.directMessage.update({
@@ -381,8 +189,9 @@ export async function editDirectMessage(
 /**
  * Soft-deletes a message the caller sent.
  *
- * Never a hard delete: replies pointing at this row keep their context, and the
- * read layer stops serving the body instead.
+ * The row is kept so replies pointing at it keep their context, and the read
+ * layer stops serving the body. An attached file is removed outright: it is the
+ * privacy-sensitive part, and nothing needs it once the message is gone.
  */
 export async function deleteDirectMessage(
   messageId: string,
@@ -413,17 +222,39 @@ export async function deleteDirectMessage(
     return { ok: false, message: NOT_YOURS };
   }
 
-  // Idempotent: a double-tap, or a retry after the response was lost, lands here
-  // and is reported as the success it already is.
-  if (existing.deletedAt !== null) {
-    return { ok: true, message: "Deleted." };
-  }
+  // A live message and its private bytes disappear in one transaction. If either
+  // mutation fails, the message stays visible with its Delete control so the
+  // user can retry; there is no hidden attachment orphan. During a rolling
+  // deployment the attachment table may not exist yet, in which case the
+  // transaction rolls back and the old text-only soft delete remains available.
+  if (existing.deletedAt === null) {
+    try {
+      await prisma.$transaction([
+        prisma.directMessage.update({
+          where: { id: existing.id },
+          data: { deletedAt: new Date() },
+          select: { id: true },
+        }),
+        prisma.directMessageAttachment.deleteMany({
+          where: { messageId: existing.id },
+        }),
+      ]);
+    } catch (error: unknown) {
+      if (!isMissingAttachmentSchema(error)) {
+        throw error;
+      }
 
-  await prisma.directMessage.update({
-    where: { id: existing.id },
-    data: { deletedAt: new Date() },
-    select: { id: true },
-  });
+      await prisma.directMessage.update({
+        where: { id: existing.id },
+        data: { deletedAt: new Date() },
+        select: { id: true },
+      });
+    }
+  } else {
+    // Compatibility cleanup for a row deleted by an older deployment where the
+    // two mutations were separate. Idempotent and tolerant of a missing table.
+    await purgeAttachment(existing.id);
+  }
 
   revalidateThread(existing.receiver.username);
 

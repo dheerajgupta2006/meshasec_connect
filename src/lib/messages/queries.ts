@@ -9,6 +9,12 @@ import "server-only";
  */
 
 import {
+  attachmentPreviewText,
+  type AttachmentLabelView,
+  type AttachmentView,
+} from "@/lib/messages/attachment-rules";
+import { loadAttachmentSummaries } from "@/lib/messages/attachments";
+import {
   MAX_SEARCH_CHARS,
   MAX_SEARCH_HITS,
   MIN_SEARCH_CHARS,
@@ -28,11 +34,16 @@ export interface QuotedMessagePreview {
   deleted: boolean;
   /** True when the viewer wrote the quoted message. */
   outgoing: boolean;
+  /** What the original carried, so a caption-less photo can still be labelled. */
+  attachment: AttachmentLabelView | null;
 }
 
 export interface ThreadMessage {
   id: string;
-  /** Empty string when `deleted` is true — the real body is never served. */
+  /**
+   * Empty string when `deleted` is true — the real body is never served. Also
+   * empty for an attachment sent without a caption.
+   */
   body: string;
   createdAt: Date;
   /** True when the signed-in viewer wrote it. */
@@ -41,6 +52,8 @@ export interface ThreadMessage {
   editedAt: Date | null;
   deleted: boolean;
   replyTo: QuotedMessagePreview | null;
+  /** Null for text-only messages, and always null once deleted. */
+  attachment: AttachmentView | null;
 }
 
 export interface ConversationSummary {
@@ -118,9 +131,30 @@ export async function listThread(
   // Restores the oldest-first order the caller and the UI expect.
   rows.reverse();
 
+  // Attachments for every live message in the window and every live quoted
+  // original, in one query. A separate query rather than a relation select, so
+  // a database without the attachment table still serves the thread.
+  const liveIds = new Set<string>();
+
+  rows.forEach((row) => {
+    if (row.deletedAt === null) {
+      liveIds.add(row.id);
+    }
+
+    if (row.replyTo !== null && row.replyTo.deletedAt === null) {
+      liveIds.add(row.replyTo.id);
+    }
+  });
+
+  const attachments = await loadAttachmentSummaries(Array.from(liveIds));
+
   return rows.map((row) => {
     const deleted = row.deletedAt !== null;
     const quoted = row.replyTo;
+    const quotedAttachment =
+      quoted === null || quoted.deletedAt !== null
+        ? null
+        : (attachments.get(quoted.id) ?? null);
 
     return {
       id: row.id,
@@ -142,7 +176,15 @@ export async function listThread(
                   : null,
               deleted: quoted.deletedAt !== null,
               outgoing: quoted.senderId === viewerId,
+              attachment:
+                quotedAttachment === null
+                  ? null
+                  : {
+                      kind: quotedAttachment.kind,
+                      fileName: quotedAttachment.fileName,
+                    },
             },
+      attachment: deleted ? null : (attachments.get(row.id) ?? null),
     };
   });
 }
@@ -292,14 +334,23 @@ export async function latestUnreadForClerkUser(
 
   const username = latest.sender.username ?? "someone";
 
+  // A live message with an empty body is an attachment sent without a caption.
+  // Only that case costs a second query, so the common tick stays at one.
+  const text =
+    latest.body.length > 0
+      ? latest.body
+      : attachmentPreviewText(
+          (await loadAttachmentSummaries([latest.id])).get(latest.id) ?? null,
+        );
+
   return {
     id: latest.id,
     fromName: latest.sender.name ?? `@${username}`,
     fromUsername: username,
     preview:
-      latest.body.length > ALERT_PREVIEW_CHARS
-        ? `${latest.body.slice(0, ALERT_PREVIEW_CHARS - 1)}…`
-        : latest.body,
+      text.length > ALERT_PREVIEW_CHARS
+        ? `${text.slice(0, ALERT_PREVIEW_CHARS - 1)}…`
+        : text,
   };
 }
 
@@ -337,6 +388,7 @@ export async function listConversations(
         ],
       },
       select: {
+        id: true,
         body: true,
         createdAt: true,
         senderId: true,
@@ -364,7 +416,7 @@ export async function listConversations(
   // `recent` is newest-first, so the first hit per person is their latest message.
   const latestByPerson = new Map<
     string,
-    { body: string; createdAt: Date }
+    { id: string; body: string; createdAt: Date; deleted: boolean }
   >();
 
   for (const message of recent) {
@@ -373,6 +425,7 @@ export async function listConversations(
 
     if (!latestByPerson.has(otherId)) {
       latestByPerson.set(otherId, {
+        id: message.id,
         // A soft-deleted last message still dates the conversation, but its body
         // is replaced rather than served.
         body:
@@ -380,16 +433,42 @@ export async function listConversations(
             ? message.body
             : DELETED_MESSAGE_PLACEHOLDER,
         createdAt: message.createdAt,
+        deleted: message.deletedAt !== null,
       });
     }
   }
 
+  // Labels the last message when it carried a file, so the list says "📷 Photo"
+  // instead of showing a blank line for an attachment sent without a caption.
+  const liveLatestIds: string[] = [];
+
+  latestByPerson.forEach((latest) => {
+    if (!latest.deleted) {
+      liveLatestIds.push(latest.id);
+    }
+  });
+
+  const attachments = await loadAttachmentSummaries(liveLatestIds);
+
   const summaries: ConversationSummary[] = contacts.map((contact) => {
     const latest = latestByPerson.get(contact.id);
+    const attachment =
+      latest === undefined ? undefined : attachments.get(latest.id);
+
+    let lastMessage: string | null = latest?.body ?? null;
+
+    if (latest !== undefined && attachment !== undefined) {
+      const label = attachmentPreviewText(attachment);
+
+      lastMessage =
+        latest.body.length > 0
+          ? `${attachment.kind === "image" ? "📷" : "📎"} ${latest.body}`
+          : label;
+    }
 
     return {
       person: contact,
-      lastMessage: latest?.body ?? null,
+      lastMessage,
       lastMessageAt: latest?.createdAt ?? null,
       unreadCount: unreadByPerson.get(contact.id) ?? 0,
     };

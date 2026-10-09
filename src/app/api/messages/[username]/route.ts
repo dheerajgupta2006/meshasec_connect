@@ -69,7 +69,11 @@ export async function GET(
                 body: message.replyTo.body,
                 deleted: message.replyTo.deleted,
                 outgoing: message.replyTo.outgoing,
+                attachment: message.replyTo.attachment,
               },
+        // Metadata only. The bytes are served by the attachment route, which
+        // re-checks access on every request.
+        attachment: message.attachment,
       })),
     },
     { headers: { "Cache-Control": "no-store" } },
