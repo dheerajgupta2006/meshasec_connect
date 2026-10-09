@@ -7,6 +7,10 @@ import {
   recordAttendance,
 } from "@/lib/meetings/authorization";
 import {
+  attributedAccountDisplayName,
+  validateMeetingDisplayName,
+} from "@/lib/meetings/display-name";
+import {
   guestApprovalState,
   isGuestBanned,
 } from "@/lib/meetings/guest-admission";
@@ -75,6 +79,18 @@ function readPasscode(value: unknown): string | null {
   return typeof body.passcode === "string" ? body.passcode : null;
 }
 
+/**
+ * Returns the raw meeting alias so the shared validator can distinguish an
+ * omitted field (use the verified fallback) from a malformed one (reject it).
+ */
+function readParticipantName(value: unknown): unknown {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+
+  return (value as Record<string, unknown>).participantName;
+}
+
 function errorResponse(message: string, status: number): NextResponse {
   return NextResponse.json({ error: message }, { status });
 }
@@ -83,8 +99,10 @@ function errorResponse(message: string, status: number): NextResponse {
  * Mints a token for a guest holding a verified session.
  *
  * The session cookie is the credential: it was issued by `/api/meetings/guest`
- * only after the passcode was checked, and it names exactly one meeting. Nothing
- * from the request body is trusted here — not the room, not the display name.
+ * only after the passcode was checked, and it names exactly one meeting. The
+ * request cannot choose the room or identity. It may choose a bounded,
+ * control-character-free meeting alias, but `(guest)` is appended by the server
+ * so that alias can never pass as a verified account.
  *
  * The ban is re-checked at mint time rather than only at exchange time, because a
  * guest removed mid-call still holds a valid-looking cookie and would otherwise
@@ -94,7 +112,7 @@ async function issueGuestAccessToken(
   meetingCode: string,
   apiKey: string,
   apiSecret: string,
-  request: Request,
+  requestedDisplayName: unknown,
 ): Promise<NextResponse> {
   const store = await cookies();
   const session = readGuestSessionFor(
@@ -179,9 +197,19 @@ async function issueGuestAccessToken(
   }
 
   const identity = guestIdentity(session.guestId);
-  // Suffixed so nobody can pass themselves off as an account holder by choosing a
-  // display name. Other participants can always tell a guest apart.
-  const displayName = `${session.displayName} (guest)`;
+  const requestedName = validateMeetingDisplayName(
+    requestedDisplayName,
+    session.displayName,
+  );
+
+  if (!requestedName.ok) {
+    return errorResponse(requestedName.message, 400);
+  }
+
+  // Suffixed server-side so nobody can pass themselves off as an account holder
+  // by choosing the same alias as one. Other participants can always tell a guest
+  // apart.
+  const displayName = `${requestedName.name} (guest)`;
 
   const accessToken = new AccessToken(apiKey, apiSecret, {
     identity,
@@ -195,8 +223,6 @@ async function issueGuestAccessToken(
     canPublish: true,
     canSubscribe: true,
   });
-
-  void request;
 
   return NextResponse.json(
     { token: await accessToken.toJwt(), identity, name: displayName },
@@ -249,7 +275,7 @@ export async function POST(request: Request): Promise<NextResponse> {
         meetingCode,
         apiKey,
         apiSecret,
-        request,
+        readParticipantName(body),
       );
     } catch (error) {
       console.error("Failed to generate a guest access token", error);
@@ -342,9 +368,26 @@ export async function POST(request: Request): Promise<NextResponse> {
     // person who joined. `recordAttendance` upserts, so this is idempotent.
     await recordAttendance(decision.meeting.id, me.id);
 
-    // The display name comes from the verified profile, never from the request
-    // body. Trusting the client here allowed trivial impersonation.
-    const displayName = me.name ?? me.username;
+    // A meeting-scoped alias is accepted, but never without attribution. The old
+    // route ignored this field entirely, which made the editable lobby control a
+    // lie; blindly trusting it instead would let an account impersonate another
+    // participant. Appending the verified handle when the alias differs gives the
+    // user the name they chose while retaining who is actually behind it.
+    const accountName = (me.name ?? me.username).trim() || me.username;
+    const requestedName = validateMeetingDisplayName(
+      readParticipantName(body),
+      accountName,
+    );
+
+    if (!requestedName.ok) {
+      return errorResponse(requestedName.message, 400);
+    }
+
+    const displayName = attributedAccountDisplayName(
+      requestedName.name,
+      accountName,
+      me.username,
+    );
 
     const accessToken = new AccessToken(apiKey, apiSecret, {
       identity: me.clerkId,

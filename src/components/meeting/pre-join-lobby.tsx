@@ -56,6 +56,10 @@ import {
   NO_BACKGROUND,
   type BackgroundEffect,
 } from "@/lib/meetings/backgrounds";
+import {
+  MEETING_DISPLAY_NAME_MAX_CODE_POINTS,
+  validateMeetingDisplayName,
+} from "@/lib/meetings/display-name";
 import { requestGuestKnock } from "@/lib/meetings/guest-knock-client";
 import { ROOM_PASSCODE_DIGITS } from "@/lib/meetings/types";
 import {
@@ -212,6 +216,9 @@ export function PreJoinLobby({
   const [selectedMicrophoneId, setSelectedMicrophoneId] = useState("");
   const [selectedSpeakerId, setSelectedSpeakerId] = useState("");
   const [participantName, setParticipantName] = useState("");
+  const [participantNameError, setParticipantNameError] = useState<string | null>(
+    null,
+  );
   const [mediaStatus, setMediaStatus] =
     useState<MediaStatus>("requesting");
   const [mediaError, setMediaError] = useState<string | null>(null);
@@ -645,11 +652,16 @@ export function PreJoinLobby({
   const handleJoin = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
-    const trimmedName = participantName.trim();
+    const checkedName = validateMeetingDisplayName(participantName, "Guest");
 
-    if (!trimmedName || mediaStatus !== "ready" || isJoining) {
+    if (!checkedName.ok || mediaStatus !== "ready" || isJoining) {
+      if (!checkedName.ok) {
+        setParticipantNameError(checkedName.message);
+      }
       return;
     }
+
+    const trimmedName = checkedName.name;
 
     // Scheduled meeting, not open yet. The button is disabled too; this guards
     // against a submit from the keyboard.
@@ -1070,17 +1082,45 @@ export function PreJoinLobby({
               <form className="space-y-5" onSubmit={handleJoin}>
                 <div className="space-y-2">
                   <label className="text-sm font-medium" htmlFor="participant-name">
-                    Display name
+                    Name for this meeting
                   </label>
                   <Input
                     id="participant-name"
                     value={participantName}
-                    onChange={(event) => setParticipantName(event.target.value)}
-                    maxLength={100}
+                    onChange={(event) => {
+                      setParticipantName(event.target.value);
+                      setParticipantNameError(null);
+                    }}
+                    // `maxLength` counts UTF-16 units; doubling the code-point
+                    // limit lets sixty emoji through while the shared validator
+                    // enforces the real limit.
+                    maxLength={MEETING_DISPLAY_NAME_MAX_CODE_POINTS * 2}
                     placeholder="Your name"
                     autoComplete="name"
+                    aria-invalid={participantNameError !== null}
+                    aria-describedby={
+                      participantNameError === null
+                        ? "participant-name-help"
+                        : "participant-name-error"
+                    }
                     className="border-zinc-700 bg-zinc-950/70 text-zinc-50 placeholder:text-zinc-600"
                   />
+                  {participantNameError === null ? (
+                    <p
+                      id="participant-name-help"
+                      className="text-xs text-zinc-500"
+                    >
+                      Used only in this meeting; it does not rename your account.
+                    </p>
+                  ) : (
+                    <p
+                      id="participant-name-error"
+                      role="alert"
+                      className="text-xs text-red-300"
+                    >
+                      {participantNameError}
+                    </p>
+                  )}
                 </div>
 
                 {waitingForStart && opensAtMs !== null && (
