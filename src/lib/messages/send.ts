@@ -20,6 +20,7 @@ import {
   ATTACHMENT_BUDGET_WINDOW_MS,
   MAX_ATTACHMENT_BYTES_PER_DAY,
   attachmentPreviewText,
+  isVoiceMessageAttachment,
   type AttachmentKind,
   type AttachmentLabelView,
   type AttachmentView,
@@ -256,8 +257,13 @@ function pushPreview(body: string, attachment: PreparedAttachment | null): strin
     return truncate(label, PUSH_PREVIEW_CHARS);
   }
 
-  // The icon from the label, then the caption: "📷 Look at this".
-  const icon = attachment.kind === "image" ? "📷" : "📎";
+  // Match the attachment label, then put the caption beside its compact icon.
+  const icon =
+    attachment.kind === "image"
+      ? "📷"
+      : isVoiceMessageAttachment(attachment)
+        ? "🎤"
+        : "📎";
 
   return truncate(`${icon} ${body}`, PUSH_PREVIEW_CHARS);
 }
@@ -269,6 +275,11 @@ export interface DeliverInput {
   clientId?: string;
   replyToId?: string;
   attachment: PreparedAttachment | null;
+  /**
+   * Present only for authored direct-call chat. A PostgreSQL trigger validates
+   * the exact pair and expansion state atomically with the insert.
+   */
+  sourceMeetingId?: string;
 }
 
 /**
@@ -386,6 +397,7 @@ export async function deliverDirectMessage(
     body,
     clientId: idempotencyKey,
     replyToId: quotedId,
+    sourceMeetingId: input.sourceMeetingId ?? null,
   };
 
   let created: { id: string; createdAt: Date } | null = null;
@@ -511,6 +523,7 @@ export async function deliverDirectMessage(
         deletedAt: true,
         receiverId: true,
         replyToId: true,
+        sourceMeetingId: true,
         replyTo: {
           select: { id: true, body: true, senderId: true, deletedAt: true },
         },
@@ -541,6 +554,7 @@ export async function deliverDirectMessage(
     if (
       winner.body !== body ||
       winner.replyToId !== quotedId ||
+      winner.sourceMeetingId !== (input.sourceMeetingId ?? null) ||
       !sameAttachment(winnerAttachment, attachment)
     ) {
       return {

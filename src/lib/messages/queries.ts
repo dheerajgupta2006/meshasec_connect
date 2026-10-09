@@ -10,6 +10,7 @@ import "server-only";
 
 import {
   attachmentPreviewText,
+  isVoiceMessageAttachment,
   type AttachmentLabelView,
   type AttachmentView,
 } from "@/lib/messages/attachment-rules";
@@ -462,7 +463,13 @@ export async function listConversations(
 
       lastMessage =
         latest.body.length > 0
-          ? `${attachment.kind === "image" ? "📷" : "📎"} ${latest.body}`
+          ? `${
+              attachment.kind === "image"
+                ? "📷"
+                : isVoiceMessageAttachment(attachment)
+                  ? "🎤"
+                  : "📎"
+            } ${latest.body}`
           : label;
     }
 
