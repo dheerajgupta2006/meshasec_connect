@@ -4,10 +4,12 @@ import {
   Check,
   CornerUpLeft,
   LoaderCircle,
+  Mic,
   Paperclip,
   Pencil,
   Reply,
   Send,
+  Square,
   Trash2,
   UserRound,
   Video,
@@ -50,10 +52,16 @@ import { uploadAttachment } from "@/components/messages/upload-attachment";
 import { useComposerTranslation } from "@/components/messages/use-composer-translation";
 import { TranslationPicker } from "@/components/messages/translation-picker";
 import { useThreadTranslation } from "@/components/messages/use-thread-translation";
+import {
+  MAX_VOICE_RECORDING_MS,
+  formatVoiceDuration,
+  useVoiceRecorder,
+} from "@/components/messages/use-voice-recorder";
 import { mintCreationRequestId } from "@/lib/meetings/creation-request-id";
 import {
   ATTACHMENT_ACCEPT,
   attachmentPreviewText,
+  isVoiceMessageAttachment,
   parseAttachmentLabel,
   parseAttachmentView,
   type AttachmentLabelView,
@@ -114,7 +122,7 @@ interface ThreadItem {
 /** A file waiting in the composer to be sent. */
 interface ComposerAttachment {
   upload: PreparedUpload;
-  /** Object URL for a photo's thumbnail, and later its bubble. Null for files. */
+  /** Object URL for an image/audio preview and its optimistic bubble. */
   previewUrl: string | null;
   /**
    * Idempotency key, minted when the file is attached and kept with it across
@@ -171,7 +179,13 @@ function previewLine(
     return attachmentPreviewText(attachment);
   }
 
-  return `${attachment.kind === "image" ? "📷" : "📎"} ${text}`;
+  return `${
+    attachment.kind === "image"
+      ? "📷"
+      : isVoiceMessageAttachment(attachment)
+        ? "🎤"
+        : "📎"
+  } ${text}`;
 }
 
 /** The quote an outgoing reply carries, built from the message it answers. */
@@ -246,6 +260,10 @@ function settleOptimisticRows(
 
   return replaced ? next : [...next, settled];
 }
+
+const VOICE_RECORDING_LIMIT_LABEL = formatVoiceDuration(
+  MAX_VOICE_RECORDING_MS,
+);
 
 const timeFormatter = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
@@ -369,8 +387,8 @@ export function MessageThread({
     Partial<Record<string, number>>
   >({});
   /**
-   * Local object URLs for photos while their uploads are still open, keyed by
-   * optimistic attachment id. A successful send immediately switches to the
+   * Local object URLs for images and audio while their uploads are still open,
+   * keyed by optimistic attachment id. A successful send immediately switches to the
    * authenticated route and revokes the URL, so private blobs cannot accumulate
    * for the lifetime of a long-open thread.
    */
@@ -391,6 +409,15 @@ export function MessageThread({
    * draft.
    */
   const outgoing = useComposerTranslation(contactUsername, draft);
+
+  const voiceRecorder = useVoiceRecorder({
+    onRecorded: (file) => {
+      void attachFile(file);
+    },
+    onError: setError,
+  });
+  const voiceBusy = voiceRecorder.status !== "idle";
+  const cancelVoiceRecording = voiceRecorder.cancel;
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const editInputRef = useRef<HTMLInputElement | null>(null);
@@ -541,8 +568,14 @@ export function MessageThread({
     return () => window.clearTimeout(timer);
   }, [highlightId]);
 
-  // Object URLs pin their blobs in memory until revoked, and a photo can be
-  // several megabytes, so leaving the thread releases every one it made.
+  // A dynamic-route transition can reuse this component instance. Never let a
+  // microphone stream survive into a different person's conversation.
+  useEffect(() => {
+    return () => cancelVoiceRecording();
+  }, [contactId, cancelVoiceRecording]);
+
+  // Object URLs pin their blobs in memory until revoked, and an image or audio
+  // recording can be several megabytes, so leaving the thread releases each one.
   useEffect(() => {
     mountedRef.current = true;
     const urls = objectUrlsRef.current;
@@ -637,6 +670,23 @@ export function MessageThread({
     replaceComposerAttachment(null, true);
   }
 
+  function startVoiceRecording(): void {
+    if (
+      voiceBusy ||
+      preparingName !== null ||
+      composerAttachmentRef.current !== null
+    ) {
+      return;
+    }
+
+    // Starting a recording is a deliberate new composer action. An older upload
+    // failure must not restore itself over the recording while permission is
+    // open or while audio is being captured.
+    noteComposerChange();
+    setError(null);
+    void voiceRecorder.start();
+  }
+
   /** Resizes or checks a picked file, then puts it in the composer. */
   async function attachFile(file: File): Promise<boolean> {
     noteComposerChange();
@@ -664,7 +714,8 @@ export function MessageThread({
       {
         upload: result.upload,
         previewUrl:
-          result.upload.kind === "image"
+          result.upload.kind === "image" ||
+          result.upload.mimeType.startsWith("audio/")
             ? createPreviewUrl(result.upload.blob)
             : null,
         clientId: mintCreationRequestId(),
@@ -690,6 +741,11 @@ export function MessageThread({
     event.target.value = "";
 
     if (file !== null) {
+      if (voiceBusy) {
+        setError("Finish or cancel the voice recording before attaching a file.");
+        return;
+      }
+
       void attachFile(file);
     }
   }
@@ -698,6 +754,12 @@ export function MessageThread({
     const file = event.clipboardData.files[0];
 
     if (file === undefined) {
+      return;
+    }
+
+    if (voiceBusy) {
+      event.preventDefault();
+      setError("Finish or cancel the voice recording before pasting a file.");
       return;
     }
 
@@ -723,6 +785,11 @@ export function MessageThread({
     }
 
     event.preventDefault();
+
+    if (voiceBusy) {
+      return;
+    }
+
     dragDepthRef.current += 1;
     setIsDraggingFile(true);
   }
@@ -734,7 +801,7 @@ export function MessageThread({
 
     // Without this the browser refuses the drop, and opens the file instead.
     event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
+    event.dataTransfer.dropEffect = voiceBusy ? "none" : "copy";
   }
 
   function handleDragLeave(event: DragEvent<HTMLDivElement>): void {
@@ -760,6 +827,11 @@ export function MessageThread({
     event.preventDefault();
     dragDepthRef.current = 0;
     setIsDraggingFile(false);
+
+    if (voiceBusy) {
+      setError("Finish or cancel the voice recording before dropping a file.");
+      return;
+    }
 
     // Read now: the drag data is unavailable once this handler returns.
     const files = event.dataTransfer.files;
@@ -945,6 +1017,12 @@ export function MessageThread({
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
+    // A recording owns this composer until it has been stopped or cancelled;
+    // Enter must not send its caption as a standalone text message.
+    if (voiceBusy) {
+      return;
+    }
 
     // A file is still being resized. Sending now would either leave it behind or
     // send it without the caption being typed for it.
@@ -1150,7 +1228,7 @@ export function MessageThread({
   }
 
   function handleCall() {
-    if (isCalling) {
+    if (isCalling || voiceBusy) {
       return;
     }
 
@@ -1216,7 +1294,7 @@ export function MessageThread({
           size="sm"
           variant="outline"
           onClick={handleCall}
-          disabled={isCalling}
+          disabled={isCalling || voiceBusy}
           aria-label={`Start a call with @${contactUsername}`}
         >
           {isCalling ? (
@@ -1585,6 +1663,64 @@ export function MessageThread({
         </div>
       )}
 
+      {voiceBusy && (
+        <div
+          className="flex items-center gap-3 border-t bg-muted/40 px-3 py-2 sm:px-4"
+          role="status"
+          aria-live="polite"
+        >
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-destructive/10 text-destructive-text">
+            {voiceRecorder.status === "recording" ? (
+              <span
+                className="h-2.5 w-2.5 animate-pulse rounded-full bg-current"
+                aria-hidden="true"
+              />
+            ) : (
+              <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />
+            )}
+          </span>
+
+          <div className="min-w-0 flex-1 text-xs">
+            <p className="font-medium">
+              {voiceRecorder.status === "requesting"
+                ? "Waiting for microphone permission"
+                : voiceRecorder.status === "stopping"
+                  ? "Preparing voice message"
+                  : "Recording voice message"}
+            </p>
+            <p className="font-mono tabular-nums text-muted-foreground">
+              {formatVoiceDuration(voiceRecorder.elapsedMs)} / {VOICE_RECORDING_LIMIT_LABEL}
+            </p>
+          </div>
+
+          {voiceRecorder.status === "recording" && (
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              onClick={voiceRecorder.stop}
+              className="h-8 px-2.5 text-xs"
+              aria-label="Stop voice recording"
+            >
+              <Square className="h-3.5 w-3.5 fill-current" />
+              Stop
+            </Button>
+          )}
+
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            onClick={voiceRecorder.cancel}
+            className="h-8 w-8 shrink-0 text-muted-foreground"
+            aria-label="Cancel voice recording"
+            title="Cancel voice recording"
+          >
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
+
       {preparingName !== null ? (
         <PendingAttachmentPreview
           status="preparing"
@@ -1628,14 +1764,35 @@ export function MessageThread({
           size="icon"
           variant="ghost"
           onClick={() => fileInputRef.current?.click()}
+          disabled={voiceBusy}
           className="h-11 w-11 shrink-0 text-muted-foreground sm:h-10 sm:w-10"
           aria-label="Attach a photo or file"
           title="Attach a photo or file"
         >
           <Paperclip className="h-4 w-4" />
         </Button>
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          onClick={startVoiceRecording}
+          disabled={
+            voiceBusy ||
+            preparingName !== null ||
+            composerAttachment !== null
+          }
+          className="h-11 w-11 shrink-0 text-muted-foreground sm:h-10 sm:w-10"
+          aria-label="Record a voice message"
+          title={
+            voiceRecorder.isSupported
+              ? "Record a voice message"
+              : "Voice recording requires microphone support and HTTPS"
+          }
+        >
+          <Mic className="h-4 w-4" />
+        </Button>
         <label className="sr-only" htmlFor="message-body">
-          {composerAttachment === null ? "Message" : "Caption"}
+          {voiceBusy || composerAttachment !== null ? "Caption" : "Message"}
         </label>
         <Input
           id="message-body"
@@ -1644,11 +1801,13 @@ export function MessageThread({
           onChange={handleDraftChange}
           onPaste={handlePaste}
           placeholder={
-            composerAttachment !== null
-              ? "Add a caption (optional)"
-              : replyTarget === null
-                ? `Message @${contactUsername}`
-                : "Write your reply"
+            voiceBusy
+              ? "Add a caption while recording (optional)"
+              : composerAttachment !== null
+                ? "Add a caption (optional)"
+                : replyTarget === null
+                  ? `Message @${contactUsername}`
+                  : "Write your reply"
           }
           maxLength={4000}
           autoComplete="off"
@@ -1661,6 +1820,7 @@ export function MessageThread({
           // what gets sent, so it must be on screen first. Also blocked while a
           // file is still being prepared, so it cannot be left behind.
           disabled={
+            voiceBusy ||
             preparingName !== null ||
             (composerAttachment === null && draft.trim().length === 0) ||
             !outgoing.isReady

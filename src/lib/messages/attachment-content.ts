@@ -484,7 +484,16 @@ export function isProbablyText(bytes: Uint8Array): boolean {
 }
 
 /** ISO base media file format box types that may open an MP4, M4A or MOV. */
-const ISO_BMFF_BOXES = ["ftyp", "moov", "mdat", "wide", "free", "skip", "pnot"];
+const ISO_BMFF_BOXES = [
+  "ftyp",
+  "styp",
+  "moov",
+  "mdat",
+  "wide",
+  "free",
+  "skip",
+  "pnot",
+];
 
 /** HEIF brands, read from the `ftyp` box. */
 const HEIF_BRANDS = [

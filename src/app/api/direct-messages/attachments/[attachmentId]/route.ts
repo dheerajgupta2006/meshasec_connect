@@ -28,13 +28,13 @@ const ID_PATTERN = /^[a-z0-9]{1,64}$/i;
  *
  * `nosniff` stops a browser second-guessing the declared type; the CSP with
  * `sandbox` means that even opened directly in a tab, nothing in the response
- * can run script on this origin. `img-src 'self'` is there because some browsers
- * apply the CSP to the synthetic page they build to show a bare image.
+ * can run script on this origin. `img-src` and `media-src` cover the synthetic
+ * pages browsers may build when an image or audio file is opened directly.
  */
 const SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "Content-Security-Policy":
-    "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox",
+    "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; sandbox",
   "Cross-Origin-Resource-Policy": "same-origin",
   "Referrer-Policy": "no-referrer",
 } as const;
@@ -48,6 +48,57 @@ function notFound(): NextResponse {
     { error: "Not found" },
     { status: 404, headers: { "Cache-Control": "no-store" } },
   );
+}
+
+type ByteRange = { start: number; end: number } | "invalid" | null;
+
+/**
+ * A single HTTP byte range for native audio metadata requests and seeking.
+ * Multiple ranges are deliberately refused: files are capped at 4 MB and there
+ * is no benefit in constructing multipart/byteranges responses here.
+ */
+function parseByteRange(header: string | null, size: number): ByteRange {
+  if (header === null) {
+    return null;
+  }
+
+  if (header.length > 100 || size <= 0) {
+    return "invalid";
+  }
+
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+
+  if (match === null || (match[1].length === 0 && match[2].length === 0)) {
+    return "invalid";
+  }
+
+  if (match[1].length === 0) {
+    const suffixLength = Number(match[2]);
+
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) {
+      return "invalid";
+    }
+
+    return {
+      start: Math.max(0, size - suffixLength),
+      end: size - 1,
+    };
+  }
+
+  const start = Number(match[1]);
+  const requestedEnd = match[2].length === 0 ? size - 1 : Number(match[2]);
+
+  if (
+    !Number.isSafeInteger(start) ||
+    !Number.isSafeInteger(requestedEnd) ||
+    start < 0 ||
+    start >= size ||
+    requestedEnd < start
+  ) {
+    return "invalid";
+  }
+
+  return { start, end: Math.min(requestedEnd, size - 1) };
 }
 
 /**
@@ -83,6 +134,7 @@ export async function GET(
     kind: AttachmentKind;
     fileName: string;
     mimeType: string;
+    sizeBytes: number;
     sha256: string;
     message: { senderId: string; receiverId: string; deletedAt: Date | null };
   } | null;
@@ -96,6 +148,7 @@ export async function GET(
         kind: true,
         fileName: true,
         mimeType: true,
+        sizeBytes: true,
         sha256: true,
         message: {
           select: { senderId: true, receiverId: true, deletedAt: true },
@@ -134,10 +187,12 @@ export async function GET(
     ? meta.mimeType
     : "application/octet-stream";
 
-  // Only images are shown inline. Everything else is a download, so no
-  // document format is ever rendered by the browser on this origin.
+  // Images and allowlisted audio are safe to render through their native media
+  // elements. Every other document remains a forced download on this origin.
   const download = new URL(request.url).searchParams.get("download") === "1";
-  const inline = meta.kind === AttachmentKind.IMAGE && !download;
+  const isAudio = mimeType.startsWith("audio/");
+  const inline =
+    (meta.kind === AttachmentKind.IMAGE || isAudio) && !download;
   const etag = `"${meta.sha256}"`;
 
   const headers: Record<string, string> = {
@@ -151,8 +206,29 @@ export async function GET(
     ETag: etag,
   };
 
+  if (isAudio) {
+    headers["Accept-Ranges"] = "bytes";
+  }
+
   if (etagMatches(request.headers.get("if-none-match"), etag)) {
     return new NextResponse(null, { status: 304, headers });
+  }
+
+  const ifRange = request.headers.get("if-range");
+  const range =
+    isAudio && (ifRange === null || ifRange.trim() === etag)
+      ? parseByteRange(request.headers.get("range"), meta.sizeBytes)
+      : null;
+
+  if (range === "invalid") {
+    return new NextResponse(null, {
+      status: 416,
+      headers: {
+        ...headers,
+        "Content-Range": `bytes */${meta.sizeBytes}`,
+        "Content-Length": "0",
+      },
+    });
   }
 
   const row = await prisma.directMessageAttachment.findUnique({
@@ -165,6 +241,19 @@ export async function GET(
   }
 
   const body = new Uint8Array(row.data);
+
+  if (range !== null) {
+    const partial = body.slice(range.start, range.end + 1);
+
+    return new NextResponse(partial, {
+      status: 206,
+      headers: {
+        ...headers,
+        "Content-Range": `bytes ${range.start}-${range.end}/${body.byteLength}`,
+        "Content-Length": String(partial.byteLength),
+      },
+    });
+  }
 
   return new NextResponse(body, {
     status: 200,

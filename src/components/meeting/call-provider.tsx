@@ -563,7 +563,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
         className="contents"
       >
         {/* Above `children` so chat history and raised hands survive navigation. */}
-        <MeetingChatProvider>
+        <MeetingChatProvider meetingCode={session.meetingCode}>
           <ReactionsProvider>
             {/* Here rather than in `MeetingRoom` for the same reason as chat, plus
                 one specific to captions: if this unmounted on navigation, a

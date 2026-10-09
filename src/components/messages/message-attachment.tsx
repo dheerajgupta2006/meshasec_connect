@@ -18,6 +18,7 @@ import {
   FileVideoCamera,
   ImageOff,
   LoaderCircle,
+  Mic,
   X,
 } from "lucide-react";
 import { useState } from "react";
@@ -28,6 +29,7 @@ import {
   fileTypeFor,
   fitWithinBox,
   formatBytes,
+  isVoiceMessageAttachment,
   type AttachmentKind,
   type AttachmentView,
 } from "@/lib/messages/attachment-rules";
@@ -54,6 +56,10 @@ function displayBox(attachment: AttachmentView): { width: number; height: number
 
 /** Short type label for a file card: "PDF", "Word", "Audio". */
 function typeLabel(fileName: string, kind: AttachmentKind): string {
+  if (isVoiceMessageAttachment({ kind, fileName })) {
+    return "Voice";
+  }
+
   return fileTypeFor(fileName)?.label ?? (kind === "image" ? "Photo" : "File");
 }
 
@@ -81,8 +87,8 @@ interface MessageAttachmentProps {
   attachment: AttachmentView;
   outgoing: boolean;
   /**
-   * Object URL of a photo this tab sent, shown instead of downloading it again.
-   * Null for everything else.
+   * Object URL of an image or audio recording while this tab is uploading it.
+   * Null after acknowledgement, when the authenticated route becomes the source.
    */
   localUrl: string | null;
   /** Upload progress, 0 to 100, while it is still being sent; otherwise null. */
@@ -194,6 +200,103 @@ function ImageAttachment({
   );
 }
 
+function AudioAttachment({
+  attachment,
+  outgoing,
+  localUrl,
+  progress,
+  linkable,
+  className = "",
+}: MessageAttachmentProps) {
+  const [failed, setFailed] = useState(false);
+  const src = localUrl ?? (linkable ? attachmentUrl(attachment.id) : null);
+  const voiceMessage = isVoiceMessageAttachment(attachment);
+  const title = voiceMessage ? "Voice message" : attachment.fileName;
+  const detail = `${voiceMessage ? "Voice recording" : "Audio"} · ${formatBytes(
+    attachment.sizeBytes,
+  )}`;
+  const mutedText = outgoing
+    ? "text-primary-emphasis-foreground/75"
+    : "text-muted-foreground";
+
+  return (
+    <div
+      className={`w-[280px] max-w-full rounded-xl border px-3 py-2.5 ${
+        outgoing
+          ? "border-primary-emphasis-foreground/25 bg-black/15"
+          : "border-foreground/15 bg-foreground/[0.04]"
+      } ${className}`}
+    >
+      <div className="flex items-center gap-2.5">
+        <span
+          className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg ${
+            outgoing ? "bg-black/15" : "bg-background"
+          }`}
+        >
+          {voiceMessage ? (
+            <Mic className="h-4 w-4" aria-hidden="true" />
+          ) : (
+            <FileMusic className="h-4 w-4" aria-hidden="true" />
+          )}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm font-medium">{title}</span>
+          <span className={`block truncate text-xs ${mutedText}`}>
+            {detail}
+          </span>
+        </span>
+        {linkable && progress === null && (
+          <a
+            href={attachmentUrl(attachment.id, true)}
+            download={attachment.fileName}
+            onClick={(event) => event.stopPropagation()}
+            className={`grid h-8 w-8 shrink-0 place-items-center rounded-md transition-colors hover:bg-black/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${mutedText}`}
+            aria-label={`Download ${title}`}
+            title={`Download ${title}`}
+          >
+            <Download className="h-4 w-4" aria-hidden="true" />
+          </a>
+        )}
+      </div>
+
+      {src !== null && !failed ? (
+        <audio
+          controls
+          preload="metadata"
+          src={src}
+          onError={() => setFailed(true)}
+          className="mt-2 h-9 w-full max-w-full"
+          aria-label={`Play ${title}`}
+        >
+          Your browser cannot play this audio.
+        </audio>
+      ) : (
+        <p className={`mt-2 text-xs ${mutedText}`}>
+          {linkable
+            ? "Audio playback is unavailable. Use the download button instead."
+            : "Audio preview is unavailable in this browser."}
+        </p>
+      )}
+
+      {progress !== null && (
+        <span
+          role="progressbar"
+          aria-label={`Sending ${title}`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={progress}
+          className="mt-2 block h-1 overflow-hidden rounded-full bg-black/20"
+        >
+          <span
+            className="block h-full rounded-full bg-current transition-[width] duration-200"
+            style={{ width: `${progress}%` }}
+          />
+        </span>
+      )}
+    </div>
+  );
+}
+
 function FileAttachment({
   attachment,
   outgoing,
@@ -270,13 +373,17 @@ function FileAttachment({
   );
 }
 
-/** A photo or file inside a message bubble. */
+/** A photo, playable audio clip, or downloadable file inside a message bubble. */
 export function MessageAttachment(props: MessageAttachmentProps) {
-  return props.attachment.kind === "image" ? (
-    <ImageAttachment {...props} />
-  ) : (
-    <FileAttachment {...props} />
-  );
+  if (props.attachment.kind === "image") {
+    return <ImageAttachment {...props} />;
+  }
+
+  if (props.attachment.mimeType.startsWith("audio/")) {
+    return <AudioAttachment {...props} />;
+  }
+
+  return <FileAttachment {...props} />;
 }
 
 type PendingAttachmentPreviewProps =
@@ -291,15 +398,20 @@ type PendingAttachmentPreviewProps =
       fileName: string;
       mimeType: string;
       sizeBytes: number;
-      /** Thumbnail for a photo; null for a file. */
+      /** Thumbnail or local audio source; null for other files. */
       previewUrl: string | null;
       onRemove: () => void;
     };
 
-/** The attachment waiting in the composer, with a way to take it back out. */
+/** The attachment waiting in the composer, with preview and a way to remove it. */
 export function PendingAttachmentPreview(props: PendingAttachmentPreviewProps) {
   const preparing = props.status === "preparing";
   const isPhoto = props.status === "ready" && props.kind === "image";
+  const isAudio =
+    props.status === "ready" && props.mimeType.startsWith("audio/");
+  const voiceMessage =
+    props.status === "ready" &&
+    isVoiceMessageAttachment({ kind: props.kind, fileName: props.fileName });
 
   return (
     <div
@@ -309,7 +421,7 @@ export function PendingAttachmentPreview(props: PendingAttachmentPreviewProps) {
       <span className="grid h-12 w-12 shrink-0 place-items-center overflow-hidden rounded-lg border bg-background text-muted-foreground">
         {props.status === "preparing" ? (
           <LoaderCircle className="h-5 w-5 animate-spin" aria-hidden="true" />
-        ) : props.previewUrl !== null ? (
+        ) : isPhoto && props.previewUrl !== null ? (
           // Decorative: the line beside it says what this is.
           // eslint-disable-next-line @next/next/no-img-element
           <img
@@ -317,6 +429,8 @@ export function PendingAttachmentPreview(props: PendingAttachmentPreviewProps) {
             alt=""
             className="h-full w-full object-cover"
           />
+        ) : voiceMessage ? (
+          <Mic className="h-5 w-5" aria-hidden="true" />
         ) : (
           <AttachmentIcon mimeType={props.mimeType} className="h-5 w-5" />
         )}
@@ -324,7 +438,7 @@ export function PendingAttachmentPreview(props: PendingAttachmentPreviewProps) {
 
       <div className="min-w-0 flex-1 text-xs">
         <p className="truncate font-medium">
-          {isPhoto ? "Photo" : props.fileName}
+          {isPhoto ? "Photo" : voiceMessage ? "Voice message" : props.fileName}
         </p>
         <p className="truncate text-muted-foreground">
           {props.status === "preparing"
@@ -333,6 +447,18 @@ export function PendingAttachmentPreview(props: PendingAttachmentPreviewProps) {
                 props.sizeBytes,
               )} · Add a caption or send`}
         </p>
+
+        {isAudio && props.previewUrl !== null && (
+          <audio
+            controls
+            preload="metadata"
+            src={props.previewUrl}
+            className="mt-2 h-8 w-full max-w-[280px]"
+            aria-label={voiceMessage ? "Preview voice message" : "Preview audio"}
+          >
+            Your browser cannot play this audio.
+          </audio>
+        )}
       </div>
 
       <Button
